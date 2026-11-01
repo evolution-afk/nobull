@@ -33,6 +33,8 @@ type StockStatus = 'available' | 'unavailable' | 'unknown'
 
 interface Product {
   id: string
+  providerId: string
+  providerProductId: string
   name: string
   brand: string
   brandKey: string
@@ -176,6 +178,10 @@ function normalizeProducts(payload: unknown): Product[] {
         'سایر'
       const category =
         asText(record.category ?? record.category_name) || brand
+      const providerId = asText(record.provider_id) || 'dante'
+      const providerProductId =
+        asText(record.provider_product_id) ||
+        id.replace(new RegExp(`^${providerId}--`), '')
       const brandAsset = resolveBrandAsset(
         name,
         brand,
@@ -199,6 +205,8 @@ function normalizeProducts(payload: unknown): Product[] {
 
       return {
         id,
+        providerId,
+        providerProductId,
         name,
         brand: resolvedBrand,
         brandKey,
@@ -234,7 +242,7 @@ function stockLabel(product: Product): string {
 
 function telegramUrl(product: Product): string | null {
   const username = telegramBotUsername || 'NoBullShopBot'
-  return `https://t.me/${username}?start=${encodeURIComponent(`buy_${product.id}`)}`
+  return `https://t.me/${username}?start=${encodeURIComponent(`buy_${product.providerId}__${product.providerProductId}`)}`
 }
 
 function App() {
