@@ -1,4 +1,8 @@
 import {
+  registerTelegramUser,
+  type UserRegistryKV,
+} from './_shared/broadcast'
+import {
   callTelegram,
   formatDelivery,
   sendMessage,
@@ -23,6 +27,8 @@ interface TelegramEnvironment extends BaseTelegramEnvironment, BackendEnvironmen
   ADMIN_CARD_NUMBER?: string
   ADMIN_CARD_HOLDER?: string
   USDT_MODE?: string
+  TELEGRAM_BOT_USERNAME?: string
+  NOBULL_USERS?: UserRegistryKV
 }
 
 interface TelegramContext {
@@ -945,6 +951,15 @@ export async function onRequestPost({
     const [rawCommand = '', ...args] = text.split(/\s+/)
     const command = rawCommand.split('@')[0].toLowerCase()
     const admin = isAdmin(env, message.from?.id)
+    if (command === '/start') {
+      try {
+        await registerTelegramUser(env, message.chat.id)
+      } catch (error) {
+        console.error('Telegram user registration failed.', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+      }
+    }
     if (admin && command.startsWith('/')) {
       console.info('Admin command received.', {
         action: command,

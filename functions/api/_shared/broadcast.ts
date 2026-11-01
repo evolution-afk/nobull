@@ -1,0 +1,304 @@
+import { callTelegram } from './telegram'
+import type { TelegramEnvironment } from './telegram'
+import type { ProviderConfig } from './settings'
+import { translateProductText } from '../../../src/utils/persianTranslator'
+
+export interface UserRegistryKV {
+  get(key: string): Promise<string | null>
+  put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number },
+  ): Promise<void>
+  delete(key: string): Promise<void>
+  list(options?: {
+    prefix?: string
+    cursor?: string
+  }): Promise<{
+    keys: Array<{ name: string }>
+    list_complete: boolean
+    cursor?: string
+  }>
+}
+
+export interface BroadcastEnvironment extends TelegramEnvironment {
+  TELEGRAM_BOT_USERNAME?: string
+  NOBULL_USERS?: UserRegistryKV
+}
+
+export interface BroadcastProduct {
+  id: string
+  providerProductId: string
+  provider: ProviderConfig
+  source: Record<string, unknown>
+  priceToman: number
+}
+
+const REGISTRATION_PREFIX = 'user:'
+const PRODUCT_SNAPSHOT_PREFIX = 'catalog-products:v1:'
+
+function safeKey(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100)
+}
+
+export async function registerTelegramUser(
+  env: BroadcastEnvironment,
+  chatId: string | number,
+): Promise<void> {
+  if (!env.NOBULL_USERS) {
+    throw new Error('NOBULL_USERS Cloudflare KV binding is not configured.')
+  }
+  const id = String(chatId)
+  await env.NOBULL_USERS.put(`${REGISTRATION_PREFIX}${id}`, id)
+}
+
+function text(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number') return String(value)
+  return ''
+}
+
+function persianCategory(value: string): string {
+  if (/ai|artificial intelligence|هوش مصنوعی/i.test(value)) return 'هوش مصنوعی'
+  if (/vpn|security|privacy|امنیت/i.test(value)) return 'امنیت و VPN'
+  if (/music|video|stream|entertainment|موسیقی|ویدیو|سرگرمی/i.test(value)) {
+    return 'موسیقی و ویدیو'
+  }
+  if (/design|graphic|creative|طراحی|گرافیک/i.test(value)) {
+    return 'طراحی و گرافیک'
+  }
+  if (/code|developer|programming|برنامه.?نویسی/i.test(value)) {
+    return 'برنامه‌نویسی'
+  }
+  if (/education|learning|tool|productivity|آموزش|ابزار/i.test(value)) {
+    return 'آموزش و ابزارها'
+  }
+  return 'اشتراک دیجیتال'
+}
+
+function persianProductDetails(
+  product: BroadcastProduct,
+): { title: string; details: string[] } {
+  const source = product.source
+  const title =
+    text(source.name ?? source.title ?? source.product_name) || 'اشتراک جدید'
+  const brand = text(source.brand ?? source.brand_name)
+  const category = text(source.category ?? source.category_name)
+  const description = text(source.description ?? source.subtitle)
+  const durationRules: [RegExp, string][] = [
+    [/\b12\s*months?\b|\b1\s*year\b/i, 'مدت: ۱۲ ماهه'],
+    [/\b6\s*months?\b/i, 'مدت: ۶ ماهه'],
+    [/\b3\s*months?\b/i, 'مدت: ۳ ماهه'],
+    [/\b1\s*month\b|\b30\s*days?\b/i, 'مدت: ۱ ماهه'],
+    [/\b7\s*days?\b|\b1\s*week\b/i, 'مدت: ۷ روزه'],
+  ]
+  const details = [
+    `دسته‌بندی: ${persianCategory(`${category} ${brand} ${title}`)}`,
+  ]
+  const duration = durationRules.find(([pattern]) =>
+    pattern.test(`${title} ${description}`),
+  )
+  if (duration) details.push(duration[1])
+  if (/\b(private|personal)\b/i.test(`${title} ${description}`)) {
+    details.push('نوع اکانت: شخصی')
+  } else if (/\b(shared|slot)\b/i.test(`${title} ${description}`)) {
+    details.push('نوع اکانت: اشتراکی')
+  }
+  if (/\b(full warranty|fw)\b/i.test(`${title} ${description}`)) {
+    details.push('گارانتی: مطابق توضیحات محصول')
+  }
+  if (brand) details.push(`برند: ${brand}`)
+  if (description) {
+    details.push(`توضیحات: ${translateProductText(description)}`)
+  }
+  const translatedTitle = translateProductText(title)
+  if (translatedTitle !== title) details.push(`نام فنی: ${title}`)
+  return { title: translatedTitle || title, details }
+}
+
+function purchaseUrl(
+  env: BroadcastEnvironment,
+  product: BroadcastProduct,
+): string {
+  const username = (env.TELEGRAM_BOT_USERNAME || 'NoBullShopBot').replace(
+    /^@/,
+    '',
+  )
+  const payload = `buy_${product.provider.id}_${product.providerProductId}`
+  return `https://t.me/${username}?start=${encodeURIComponent(payload)}`
+}
+
+async function broadcastProduct(
+  env: BroadcastEnvironment,
+  product: BroadcastProduct,
+): Promise<boolean> {
+  if (!env.NOBULL_USERS || !env.TELEGRAM_BOT_TOKEN) {
+    throw new Error('User registry or Telegram bot is not configured.')
+  }
+  const details = persianProductDetails(product)
+  const message = [
+    '✨ محصول جدید به فروشگاه نوبول اضافه شد!',
+    '',
+    details.title,
+    '',
+    ...details.details,
+    `قیمت نهایی: ${new Intl.NumberFormat('fa-IR').format(product.priceToman)} تومان`,
+    '',
+    'قیمت شفاف، خرید با اطلاع از شرایط محصول.',
+  ].join('\n')
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        {
+          text: 'خرید آنی',
+          url: purchaseUrl(env, product),
+        },
+      ],
+    ],
+  }
+
+  let cursor: string | undefined
+  let sent = 0
+  let blocked = 0
+  let failed = 0
+  const productKey = `${safeKey(product.provider.id)}:${safeKey(product.providerProductId)}`
+  do {
+    const page = await env.NOBULL_USERS.list({
+      prefix: REGISTRATION_PREFIX,
+      cursor,
+    })
+    for (let index = 0; index < page.keys.length; index += 20) {
+      const batch = page.keys.slice(index, index + 20)
+      const results = await Promise.allSettled(
+        batch.map(async ({ name }) => {
+          const deliveryKey = `broadcast:${productKey}:${safeKey(name.slice(REGISTRATION_PREFIX.length))}`
+          if (await env.NOBULL_USERS?.get(deliveryKey)) return
+          const chatId = await env.NOBULL_USERS?.get(name)
+          if (!chatId) return
+          try {
+            await callTelegram(env, 'sendMessage', {
+              chat_id: chatId,
+              text: message.slice(0, 4096),
+              disable_web_page_preview: true,
+              reply_markup: replyMarkup,
+            })
+            await env.NOBULL_USERS?.put(deliveryKey, 'sent')
+            sent += 1
+          } catch (error) {
+            const reason =
+              error instanceof Error ? error.message.toLowerCase() : ''
+            if (
+              /bot was blocked|chat not found|user is deactivated|bot can't initiate conversation/.test(
+                reason,
+              )
+            ) {
+              await env.NOBULL_USERS?.delete(name)
+              blocked += 1
+              return
+            }
+            failed += 1
+            console.warn('Product broadcast delivery failed for a user.')
+          }
+        }),
+      )
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          failed += 1
+          console.warn('Product broadcast user lookup failed.')
+        }
+      }
+    }
+    if (!page.list_complete && !page.cursor) {
+      throw new Error('User registry returned an incomplete page without a cursor.')
+    }
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+
+  console.info('New product broadcast finished.', {
+    providerId: product.provider.id,
+    sent,
+    blocked,
+    failed,
+  })
+  return failed === 0
+}
+
+export async function detectAndBroadcastProducts(
+  env: BroadcastEnvironment,
+  products: BroadcastProduct[],
+): Promise<void> {
+  if (products.length === 0) return
+  const registry = env.NOBULL_USERS
+  if (!registry) {
+    console.warn('Product broadcasts skipped: NOBULL_USERS KV is not configured.')
+    return
+  }
+
+  const byProvider = new Map<string, BroadcastProduct[]>()
+  for (const product of products) {
+    const list = byProvider.get(product.provider.id) ?? []
+    list.push(product)
+    byProvider.set(product.provider.id, list)
+  }
+
+  try {
+    for (const [providerId, providerProducts] of byProvider) {
+      const snapshotKey = `${PRODUCT_SNAPSHOT_PREFIX}${safeKey(providerId)}`
+      const snapshot = await registry.get(snapshotKey)
+      if (snapshot === null) {
+        await registry.put(
+          snapshotKey,
+          JSON.stringify(
+            providerProducts.map((product) => product.providerProductId),
+          ),
+        )
+        console.info('New product broadcast baseline initialized.', {
+          providerId,
+          productCount: providerProducts.length,
+        })
+        continue
+      }
+
+      let knownProductIds: Set<string>
+      try {
+        const parsed: unknown = JSON.parse(snapshot)
+        if (
+          !Array.isArray(parsed) ||
+          !parsed.every((id) => typeof id === 'string')
+        ) {
+          throw new Error('Stored product snapshot is invalid.')
+        }
+        knownProductIds = new Set(parsed)
+      } catch (error) {
+        console.error('Stored product snapshot could not be read.', {
+          providerId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        continue
+      }
+
+      let snapshotChanged = false
+      for (const product of providerProducts) {
+        if (knownProductIds.has(product.providerProductId)) continue
+        try {
+          if (await broadcastProduct(env, product)) {
+            knownProductIds.add(product.providerProductId)
+            snapshotChanged = true
+          }
+        } catch (error) {
+          console.error('New product broadcast failed.', {
+            providerId,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          })
+        }
+      }
+      if (snapshotChanged) {
+        await registry.put(snapshotKey, JSON.stringify([...knownProductIds]))
+      }
+    }
+  } catch (error) {
+    console.error('Product change detection failed.', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}

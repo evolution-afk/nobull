@@ -32,7 +32,7 @@ export interface AdminSettings {
 }
 
 export interface BackendEnvironment {
-  [key: string]: string | SettingsKV | undefined
+  [key: string]: string | object | undefined
   DANTE_KEY?: string
   PRODUCT_PROVIDERS_JSON?: string
   NOBULL_SETTINGS?: SettingsKV

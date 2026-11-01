@@ -33,7 +33,9 @@ See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rule
 
 ## Cloudflare Pages admin settings and providers
 
-Bind a Cloudflare KV namespace to Pages Functions as `NOBULL_SETTINGS`. The Telegram admin commands `/setrate`, `/setmargin`, `/setcard`, `/setprovider`, and `/autorate` write to this namespace; without it, dynamic changes are rejected rather than stored only in a temporary isolate.
+Bind Cloudflare KV namespaces to Pages Functions as `NOBULL_SETTINGS` and `NOBULL_USERS`. `NOBULL_SETTINGS` stores admin settings and receipt state; the Telegram admin commands `/setrate`, `/setmargin`, `/setcard`, `/setprovider`, and `/autorate` write to this namespace. `NOBULL_USERS` stores Telegram chat registrations and product-notification state. User tracking and broadcasts require this binding.
+
+The catalog route checks provider products on catalog cache misses. Its first successful observation for each provider is saved as a baseline without notifying users about the existing inventory. Newly detected provider product IDs are then broadcast with the already calculated Toman price and a direct purchase button. Failed deliveries are retried on a later catalog refresh; users who blocked the bot are removed from the registry. This check is request-driven (for example, when a visitor loads the storefront); for checks while it is idle, configure an external scheduled caller or a Cron-triggered Worker to request the catalog endpoint.
 
 Configure `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` as server-side Pages variables. Set Telegram's webhook secret token to the same `TELEGRAM_WEBHOOK_SECRET`. Keep provider keys and card details server-side; never use a `VITE_` prefix for secrets.
 

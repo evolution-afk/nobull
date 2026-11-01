@@ -1,4 +1,9 @@
 import {
+  detectAndBroadcastProducts,
+  type BroadcastEnvironment,
+  type BroadcastProduct,
+} from './_shared/broadcast'
+import {
   getEffectiveSettings,
   getProviderKey,
   getProviders,
@@ -10,13 +15,15 @@ import {
   type ProviderConfig,
 } from './_shared/settings'
 
-interface CatalogEnvironment extends BackendEnvironment {
+interface CatalogEnvironment
+  extends BackendEnvironment, BroadcastEnvironment {
   USDT_MODE?: string
 }
 
 interface CatalogFunctionContext {
   request: Request
   env: CatalogEnvironment
+  waitUntil?: (promise: Promise<unknown>) => void
 }
 
 interface CloudflareCacheStorage extends CacheStorage {
@@ -230,6 +237,7 @@ async function fetchProviderProducts(
 export async function onRequestGet({
   request,
   env,
+  waitUntil,
 }: CatalogFunctionContext): Promise<Response> {
   let settings: Awaited<ReturnType<typeof getEffectiveSettings>>
   let providers: ProviderConfig[]
@@ -290,9 +298,38 @@ export async function onRequestGet({
       ),
       getUsdtRate(request.url, env, settings),
     ])
-    const products = providerProducts.flatMap(({ provider, products }) =>
-      calculateProducts(products, usdtRate, settings, provider),
+    const calculatedProducts = providerProducts.map(
+      ({ provider, products: sourceProducts }) => ({
+        provider,
+        products: calculateProducts(
+          sourceProducts,
+          usdtRate,
+          settings,
+          provider,
+        ),
+      }),
     )
+    const products = calculatedProducts.flatMap(({ products }) => products)
+    const newProductCandidates: BroadcastProduct[] = calculatedProducts.flatMap(
+      ({ provider, products: providerProducts }) =>
+        providerProducts
+          .filter(
+            (product) =>
+              typeof product.id === 'string' &&
+              typeof product.provider_product_id === 'string' &&
+              Number.isFinite(Number(product.price_toman)),
+          )
+          .map((product) => ({
+            id: String(product.id),
+            providerProductId: String(product.provider_product_id),
+            provider,
+            source: product,
+            priceToman: Number(product.price_toman),
+          })),
+    )
+    const broadcast = detectAndBroadcastProducts(env, newProductCandidates)
+    if (waitUntil) waitUntil(broadcast)
+    else await broadcast
     const body = {
       products,
       usdt_rate_used: usdtRate,
