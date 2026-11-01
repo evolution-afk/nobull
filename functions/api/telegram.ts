@@ -489,6 +489,15 @@ function parseProductReference(
 ): { providerId: string; productId: string } | null {
   const valueMatch = value.match(/\bbuy_([a-z0-9-]{1,16})__([a-zA-Z0-9_-]{1,38})\b/i)
   if (valueMatch) return { providerId: valueMatch[1], productId: valueMatch[2] }
+  const singleSeparatorMatch = value.match(
+    /\bbuy_([a-z0-9-]{1,16})_([a-zA-Z0-9_-]{1,38})\b/i,
+  )
+  if (singleSeparatorMatch) {
+    return {
+      providerId: singleSeparatorMatch[1],
+      productId: singleSeparatorMatch[2],
+    }
+  }
   const legacyMatch =
     value.match(/\bbuy_([a-zA-Z0-9_-]+)\b/) ??
     value.match(/شناسه محصول:\s*([a-zA-Z0-9_-]+)/)
@@ -996,7 +1005,12 @@ export async function onRequestPost({
       return jsonResponse({ ok: true })
     }
     if (command === '/start') {
-      const match = text.match(/^\/start(?:@\w+)?\s+buy_([a-z0-9-]{1,16})__([a-zA-Z0-9_-]{1,38})$/i)
+      const legacyProviderMatch = text.match(
+        /^\/start(?:@\w+)?\s+buy_([a-z0-9-]{1,16})__([a-zA-Z0-9_-]{1,38})$/i,
+      )
+      const match = legacyProviderMatch ?? text.match(
+        /^\/start(?:@\w+)?\s+buy_([a-z0-9-]{1,16})_([a-zA-Z0-9_-]{1,38})$/i,
+      )
       const legacy = text.match(/^\/start(?:@\w+)?\s+buy_([a-zA-Z0-9_-]+)$/i)
       const productId = match?.[2] ?? legacy?.[1]
       if (productId) {

@@ -242,7 +242,8 @@ function stockLabel(product: Product): string {
 
 function telegramUrl(product: Product): string | null {
   const username = telegramBotUsername || 'NoBullShopBot'
-  return `https://t.me/${username}?start=${encodeURIComponent(`buy_${product.providerId}__${product.providerProductId}`)}`
+  const startPayload = `buy_${product.providerId}_${product.providerProductId}`
+  return `https://t.me/${username}?start=${encodeURIComponent(startPayload)}`
 }
 
 function App() {
@@ -390,7 +391,26 @@ function App() {
       await navigator.clipboard.writeText(value)
       setCopyMessage(successMessage)
     } catch {
-      setCopyMessage('کپی خودکار در دسترس نیست؛ متن را دستی کپی کنید.')
+      const input = document.createElement('textarea')
+      input.value = value
+      input.setAttribute('readonly', '')
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.append(input)
+      input.select()
+      let copied = false
+      try {
+        copied = document.execCommand('copy')
+      } catch {
+        copied = false
+      } finally {
+        input.remove()
+      }
+      setCopyMessage(
+        copied
+          ? successMessage
+          : `کپی خودکار در دسترس نیست؛ لینک را دستی کپی کنید: ${value}`,
+      )
     }
   }
 
@@ -530,6 +550,45 @@ function App() {
                     label="ابزار کد ۲ مرحله‌ای"
                   />
                 </div>
+              </div>
+            </section>
+
+            <section
+              aria-labelledby="nobull-promise"
+              className="mt-5 overflow-hidden rounded-2xl border border-primary/15 bg-gradient-to-br from-primary/[0.07] via-zinc-950/90 to-zinc-950/80 p-5 shadow-[0_12px_45px_rgba(0,242,255,0.035)] sm:mt-6 sm:p-7"
+            >
+              <p className="text-[10px] font-semibold tracking-[0.16em] text-primary/75">
+                NO BULL • OUR PROMISE
+              </p>
+              <h2
+                id="nobull-promise"
+                className="mt-2 text-lg font-extrabold leading-8 text-white sm:text-xl"
+              >
+                نوبول؛ صداقت بی‌رحمانه، قیمت واقعی، بدون حاشیه.
+              </h2>
+              <div className="mt-4 space-y-4 text-xs leading-8 text-white/65 sm:text-sm sm:leading-9">
+                <p>
+                  این اکانت‌ها همه از آفرهای کشورهای مختلف و ارزان تهیه می‌شوند.
+                  به دلیل محدودیت‌های جغرافیایی و رعایت نکردن مواردی مثل استفاده
+                  از آی‌پی کثیف یا تحریم‌های ریجنی، احتمال غیرفعال شدن برخی
+                  اکانت‌ها وجود دارد؛ اما در صورت رعایت نکات، اکثراً بدون مشکل و
+                  بدون ساسپند کار می‌کنند. در کل، خرید این اکانت‌ها در زمره
+                  خدمات بازار خاکستری قرار دارد و دارای ریسک مسدودی است. اگر
+                  امکان تهیه کارت بانکی بین‌المللی و خرید قانونی را دارید،
+                  حتماً از روش قانونی اقدام کنید؛ اما اگر مثل ما شرایط ارزی
+                  سختی دارید، حداقل با قیمت منطقی خرید کنید.
+                </p>
+                <p>
+                  هیچ‌گونه گارانتیِ دروغین و تضمین صددرصدی از سوی نوبول وجود
+                  ندارد؛ به همین دلیل است که قیمت‌ها بسیار پایین و اقتصادی
+                  تعیین شده‌اند تا برای شما دوستان عزیز ارزش خرید داشته باشد.
+                  توجه داشته باشید که این محصولات دقیقاً همان خدماتی است که
+                  خیلی‌ها با چند برابر قیمت، تحت عنوان «ساخت تیم خودمان» یا با
+                  گارانتی‌های ساختگی به شما می‌فروشند، در حالی که همه از همین
+                  سرچشمه تأمین می‌شوند. هدف ما این است که امکان تهیه این
+                  اکانت‌ها به صورت ریالی، با مناسب‌ترین قیمت و اخذ کمترین
+                  کارمزد و سود ممکن، برای شما رفقای عزیز فراهم شود.
+                </p>
               </div>
             </section>
 
@@ -863,7 +922,9 @@ function App() {
         <PurchaseModal
           product={selectedProduct}
           onClose={() => setSelectedProduct(null)}
-          onCopy={(value) => void copyText(value, 'اطلاعات سفارش کپی شد.')}
+          onCopy={(value, successMessage) =>
+            void copyText(value, successMessage ?? 'اطلاعات سفارش کپی شد.')
+          }
           copyMessage={copyMessage}
         />
       )}
@@ -1075,7 +1136,7 @@ function PurchaseModal({
 }: {
   product: Product
   onClose: () => void
-  onCopy: (value: string) => void
+  onCopy: (value: string, successMessage?: string) => void
   copyMessage: string
 }) {
   const tomanPrice = product.price_toman
@@ -1139,16 +1200,35 @@ function PurchaseModal({
         </div>
 
         {botUrl ? (
-          <a
-            href={botUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-5 flex h-12 items-center justify-center gap-2 rounded-xl bg-primary text-xs font-bold text-black shadow-[0_0_22px_rgba(0,242,255,0.18)] transition hover:shadow-[0_0_32px_rgba(0,242,255,0.34)]"
-          >
-            <MessageCircle size={16} />
-            خرید در تلگرام
-            <ArrowLeft size={15} />
-          </a>
+          <>
+            <div className="mt-5 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <a
+                href={botUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex h-12 items-center justify-center gap-2 rounded-xl bg-primary text-xs font-bold text-black shadow-[0_0_22px_rgba(0,242,255,0.18)] transition hover:shadow-[0_0_32px_rgba(0,242,255,0.34)]"
+              >
+                <MessageCircle size={16} />
+                خرید در تلگرام
+                <ArrowLeft size={15} />
+              </a>
+              <button
+                type="button"
+                onClick={() =>
+                  void onCopy(botUrl, 'لینک شروع خرید در تلگرام کپی شد.')
+                }
+                className="flex h-12 items-center justify-center gap-2 rounded-xl border border-primary/30 bg-primary/[0.08] px-4 text-xs font-semibold text-primary transition hover:bg-primary/[0.13]"
+              >
+                <Copy size={15} />
+                کپی لینک
+              </button>
+            </div>
+            {copyMessage && (
+              <p role="status" className="mt-3 text-center text-[10px] text-primary/80">
+                {copyMessage}
+              </p>
+            )}
+          </>
         ) : (
           <>
             <p className="mt-4 text-[11px] leading-6 text-white/45">
