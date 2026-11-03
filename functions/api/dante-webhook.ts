@@ -3,8 +3,13 @@ import {
   sendMessage,
   type TelegramEnvironment,
 } from './_shared/telegram'
+import { completeOrderByReference } from './_shared/orderActions'
+import {
+  getOrderByReference,
+  type BackendEnvironment,
+} from './_shared/settings'
 
-interface DanteWebhookEnvironment extends TelegramEnvironment {
+interface DanteWebhookEnvironment extends TelegramEnvironment, BackendEnvironment {
   DANTE_WEBHOOK_SECRET?: string
   TELEGRAM_ADMIN_CHAT_ID?: string
 }
@@ -96,7 +101,7 @@ export async function onRequestPost({
 
     const order = extractOrder(payload)
     const reference = order.ref ?? ''
-    const match = reference.match(/^tg-(\d+)-\d+$/)
+    const match = reference.match(/^tg-(\d+)-\d+(?:-[a-f0-9]{8})?$/i)
     if (!match) return jsonResponse({ ok: true })
     if (!order.delivery) {
       return jsonResponse({ error: 'Delivered order has no delivery payload.' }, 400)
@@ -106,6 +111,10 @@ export async function onRequestPost({
     if (!delivery) {
       return jsonResponse({ error: 'Delivered order payload is empty.' }, 400)
     }
+    const savedOrder = env.NOBULL_SETTINGS
+      ? await getOrderByReference(env, reference)
+      : null
+    if (savedOrder?.status === 'completed') return jsonResponse({ ok: true })
     const title = order.product?.name ?? order.product?.title
     const message = `✅ سفارش شما آماده است.${title ? `\nمحصول: ${title}` : ''}\n\n${delivery}`
     await sendMessage(env, match[1], message)
@@ -116,8 +125,12 @@ export async function onRequestPost({
         `تحویل سفارش ${reference} برای کاربر ${match[1]} انجام شد:${title ? `\nمحصول: ${title}` : ''}\n\n${delivery}`,
       )
     }
+    if (savedOrder) await completeOrderByReference(env, reference)
     return jsonResponse({ ok: true })
-  } catch {
+  } catch (error) {
+    console.error('Dante webhook processing failed.', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
     return jsonResponse({ error: 'Dante webhook processing failed.' }, 500)
   }
 }

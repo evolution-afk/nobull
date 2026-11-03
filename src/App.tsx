@@ -31,6 +31,7 @@ import {
   X,
   Zap,
 } from 'lucide-react'
+import AdminDashboard from './AdminDashboard'
 
 type StockStatus = 'available' | 'unavailable' | 'unknown'
 
@@ -748,7 +749,9 @@ function telegramUrl(product: Product): string | null {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'catalog' | '2fa'>('catalog')
+  const [activeTab, setActiveTab] = useState<'catalog' | '2fa' | 'admin'>(() =>
+    window.location.hash === '#admin' ? 'admin' : 'catalog',
+  )
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(true)
   const [catalogError, setCatalogError] = useState('')
@@ -799,6 +802,15 @@ function App() {
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    const syncHashRoute = () => {
+      if (window.location.hash === '#admin') setActiveTab('admin')
+      else if (activeTab === 'admin') setActiveTab('catalog')
+    }
+    window.addEventListener('hashchange', syncHashRoute)
+    return () => window.removeEventListener('hashchange', syncHashRoute)
+  }, [activeTab])
 
   const totpResult = useMemo(() => {
     const value = totpInput.trim()
@@ -1019,7 +1031,10 @@ function App() {
         >
           <button
             type="button"
-            onClick={() => setActiveTab('catalog')}
+            onClick={() => {
+              window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+              setActiveTab('catalog')
+            }}
             aria-current={activeTab === 'catalog' ? 'page' : undefined}
             className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
               activeTab === 'catalog'
@@ -1032,7 +1047,10 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('2fa')}
+            onClick={() => {
+              window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+              setActiveTab('2fa')
+            }}
             aria-current={activeTab === '2fa' ? 'page' : undefined}
             className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
               activeTab === '2fa'
@@ -1042,6 +1060,22 @@ function App() {
           >
             <KeyRound size={16} />
             دریافت کد دو مرحله‌ای (2FA)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              window.location.hash = 'admin'
+              setActiveTab('admin')
+            }}
+            aria-current={activeTab === 'admin' ? 'page' : undefined}
+            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
+              activeTab === 'admin'
+                ? 'border-emerald-300/40 bg-emerald-300/[0.08] text-emerald-100'
+                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
+            }`}
+          >
+            <LockKeyhole size={16} />
+            پنل مدیریت
           </button>
         </nav>
 
@@ -1431,7 +1465,7 @@ function App() {
               )}
             </section>
           </>
-        ) : (
+        ) : activeTab === '2fa' ? (
           <section className="mx-auto mt-8 max-w-2xl rounded-[28px] border border-white/[0.1] bg-[#080b0c]/90 p-5 shadow-[0_24px_100px_rgba(0,0,0,0.65),0_0_45px_rgba(0,242,255,0.05)] sm:mt-12 sm:p-8">
             <div className="text-center">
               <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/25 bg-primary/[0.08] text-primary shadow-[0_0_25px_rgba(0,242,255,0.1)]">
@@ -1524,6 +1558,8 @@ function App() {
               دستگاه مطمئن باز کنید.
             </div>
           </section>
+        ) : (
+          <AdminDashboard />
         )}
 
         <footer className="mt-12 flex flex-col items-center justify-between gap-3 border-t border-white/[0.07] pt-5 text-[10px] text-white/30 sm:flex-row sm:text-xs">

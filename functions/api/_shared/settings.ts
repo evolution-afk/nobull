@@ -6,6 +6,14 @@ export interface SettingsKV {
     options?: { expirationTtl?: number },
   ): Promise<void>
   delete(key: string): Promise<void>
+  list?(options?: {
+    prefix?: string
+    cursor?: string
+  }): Promise<{
+    keys: Array<{ name: string }>
+    list_complete: boolean
+    cursor?: string
+  }>
 }
 
 export interface ProviderConfig {
@@ -25,6 +33,7 @@ export interface AdminSettings {
   rateOverride?: boolean
   profitMarginPercent?: number
   profitMarginTiers?: number[]
+  usdtMode?: 'auto' | 'manual'
   fixedFeeToman?: number
   cardNumber?: string
   cardHolder?: string
@@ -43,18 +52,61 @@ export interface BackendEnvironment {
   FIXED_FEE_TOMAN?: string
   ADMIN_CARD_NUMBER?: string
   ADMIN_CARD_HOLDER?: string
+  ADMIN_PANEL_PASSWORD?: string
+  TELEGRAM_WEBHOOK_SECRET?: string
+  TELEGRAM_ADMIN_CHAT_ID?: string
+  TELEGRAM_BOT_TOKEN?: string
+}
+
+export type OrderStatus =
+  | 'pending_receipt'
+  | 'waiting_review'
+  | 'completed'
+  | 'rejected'
+  | 'processing'
+
+export interface StoredOrder {
+  orderId: string
+  createdAt: number
+  updatedAt: number
+  status: OrderStatus
+  userId: string
+  username: string
+  firstName: string
+  productId: string
+  productTitle: string
+  brand: string
+  provider: string
+  priceUsd: number
+  usdtRate: number
+  appliedMarginPercent: number
+  priceToman: number
+  estimatedProfitToman: number
+  reference: string
+  completedAt?: number
+}
+
+export interface StoredCustomer {
+  chatId: string
+  username: string
+  firstName: string
+  firstSeenAt: number
+  lastActiveAt: number
+  totalOrders: number
+  completedOrders: number
+  totalSpentToman: number
 }
 
 const SETTINGS_KEY = 'nobull:admin-settings:v1'
 
 export const DEFAULT_PROFIT_MARGIN_TIERS = [
-  { minUsd: 0, maxUsd: 1, percent: 25 },
-  { minUsd: 1, maxUsd: 2, percent: 20 },
-  { minUsd: 2, maxUsd: 3, percent: 15 },
-  { minUsd: 3, maxUsd: 5, percent: 12 },
-  { minUsd: 5, maxUsd: 8, percent: 10 },
-  { minUsd: 8, maxUsd: 12, percent: 8 },
-  { minUsd: 12, maxUsd: null, percent: 5 },
+  { minUsd: 0, maxUsd: 1, percent: 150 },
+  { minUsd: 1, maxUsd: 2, percent: 100 },
+  { minUsd: 2, maxUsd: 3, percent: 90 },
+  { minUsd: 3, maxUsd: 5, percent: 80 },
+  { minUsd: 5, maxUsd: 8, percent: 70 },
+  { minUsd: 8, maxUsd: 12, percent: 60 },
+  { minUsd: 12, maxUsd: null, percent: 50 },
 ] as const
 
 export type EffectiveSettings = Awaited<ReturnType<typeof getEffectiveSettings>>
@@ -77,6 +129,143 @@ export async function writeAdminSettings(
     SETTINGS_KEY,
     JSON.stringify({ ...settings, updatedAt: Date.now() }),
   )
+}
+
+const ORDER_PREFIX = 'nobull:order:'
+const ORDER_REFERENCE_PREFIX = 'nobull:order-reference:'
+const CUSTOMER_PREFIX = 'nobull:customer:'
+
+export async function saveOrder(
+  env: BackendEnvironment,
+  order: StoredOrder,
+): Promise<void> {
+  if (!env.NOBULL_SETTINGS) {
+    throw new Error('Configure NOBULL_SETTINGS KV before recording orders.')
+  }
+  await env.NOBULL_SETTINGS.put(
+    `${ORDER_PREFIX}${order.orderId}`,
+    JSON.stringify(order),
+  )
+  await env.NOBULL_SETTINGS.put(
+    `${ORDER_REFERENCE_PREFIX}${order.reference}`,
+    JSON.stringify(order.orderId),
+  )
+}
+
+export async function getOrder(
+  env: BackendEnvironment,
+  orderId: string,
+): Promise<StoredOrder | null> {
+  if (!env.NOBULL_SETTINGS) {
+    throw new Error('Configure NOBULL_SETTINGS KV before reading orders.')
+  }
+  return env.NOBULL_SETTINGS.get<StoredOrder>(
+    `${ORDER_PREFIX}${orderId}`,
+    'json',
+  )
+}
+
+export async function getOrderByReference(
+  env: BackendEnvironment,
+  reference: string,
+): Promise<StoredOrder | null> {
+  if (!env.NOBULL_SETTINGS) {
+    throw new Error('Configure NOBULL_SETTINGS KV before reading orders.')
+  }
+  const orderId = await env.NOBULL_SETTINGS.get<string>(
+    `${ORDER_REFERENCE_PREFIX}${reference}`,
+    'json',
+  )
+  return orderId ? getOrder(env, orderId) : null
+}
+
+export async function listStoredOrders(
+  env: BackendEnvironment,
+): Promise<StoredOrder[]> {
+  if (!env.NOBULL_SETTINGS?.list) {
+    throw new Error('NOBULL_SETTINGS KV list support is required for analytics.')
+  }
+  const orders: StoredOrder[] = []
+  let cursor: string | undefined
+  do {
+    const page = await env.NOBULL_SETTINGS.list({
+      prefix: ORDER_PREFIX,
+      cursor,
+    })
+    const values = await Promise.all(
+      page.keys.map(({ name }) =>
+        env.NOBULL_SETTINGS!.get<StoredOrder>(name, 'json'),
+      ),
+    )
+    orders.push(...values.filter((value): value is StoredOrder => value !== null))
+    if (!page.list_complete && !page.cursor) {
+      throw new Error('NOBULL_SETTINGS returned an incomplete order page.')
+    }
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+  return orders.sort((left, right) => right.createdAt - left.createdAt)
+}
+
+export async function upsertCustomer(
+  env: BackendEnvironment,
+  chatId: string | number,
+  profile: { username?: string; firstName?: string },
+  orderDelta?: { totalOrders?: number; completedOrders?: number; totalSpentToman?: number },
+): Promise<StoredCustomer> {
+  if (!env.NOBULL_SETTINGS) {
+    throw new Error('Configure NOBULL_SETTINGS KV before recording customers.')
+  }
+  const id = String(chatId)
+  const key = `${CUSTOMER_PREFIX}${id}`
+  const current = await env.NOBULL_SETTINGS.get<StoredCustomer>(key, 'json')
+  const now = Date.now()
+  const customer: StoredCustomer = {
+    chatId: id,
+    username: profile.username ?? current?.username ?? '',
+    firstName: profile.firstName ?? current?.firstName ?? '',
+    firstSeenAt: current?.firstSeenAt ?? now,
+    lastActiveAt: now,
+    totalOrders: Math.max(0, (current?.totalOrders ?? 0) + (orderDelta?.totalOrders ?? 0)),
+    completedOrders: Math.max(
+      0,
+      (current?.completedOrders ?? 0) + (orderDelta?.completedOrders ?? 0),
+    ),
+    totalSpentToman: Math.max(
+      0,
+      (current?.totalSpentToman ?? 0) + (orderDelta?.totalSpentToman ?? 0),
+    ),
+  }
+  await env.NOBULL_SETTINGS.put(key, JSON.stringify(customer))
+  return customer
+}
+
+export async function listStoredCustomers(
+  env: BackendEnvironment,
+): Promise<StoredCustomer[]> {
+  if (!env.NOBULL_SETTINGS?.list) {
+    throw new Error('NOBULL_SETTINGS KV list support is required for analytics.')
+  }
+  const customers: StoredCustomer[] = []
+  let cursor: string | undefined
+  do {
+    const page = await env.NOBULL_SETTINGS.list({
+      prefix: CUSTOMER_PREFIX,
+      cursor,
+    })
+    const values = await Promise.all(
+      page.keys.map(({ name }) =>
+        env.NOBULL_SETTINGS!.get<StoredCustomer>(name, 'json'),
+      ),
+    )
+    customers.push(
+      ...values.filter((value): value is StoredCustomer => value !== null),
+    )
+    if (!page.list_complete && !page.cursor) {
+      throw new Error('NOBULL_SETTINGS returned an incomplete customer page.')
+    }
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+  return customers.sort((left, right) => right.lastActiveAt - left.lastActiveAt)
 }
 
 export async function getEffectiveSettings(
@@ -111,6 +300,11 @@ export async function getEffectiveSettings(
   )
   return {
     ...stored,
+    usdtMode: stored.usdtMode === 'auto' || stored.usdtMode === 'manual'
+      ? stored.usdtMode
+      : env.USDT_MODE === 'auto'
+        ? 'auto'
+        : 'manual',
     manualRate:
       (Number.isFinite(storedRate) && storedRate > 0 ? storedRate : undefined) ??
       (Number.isFinite(manualRate) && manualRate > 0 ? manualRate : 68000),
@@ -281,6 +475,7 @@ export function settingsRevision(settings: AdminSettings): string {
     settings.rateOverride ? 1 : 0,
     settings.profitMarginPercent ?? 0,
     ...(settings.profitMarginTiers ?? []),
+    settings.usdtMode ?? '',
     settings.fixedFeeToman ?? 0,
     settings.activeProviderId ?? '',
   ].join('-')

@@ -6,8 +6,9 @@ interface TranslationRule {
 const rules: TranslationRule[] = [
   { pattern: /\b25\s*DW\b/gi, replacement: '۲۵ روز گارانتی' },
   { pattern: /\b7\s*DW\b/gi, replacement: '۷ روز گارانتی' },
+  { pattern: /\b1\s*MW\b/gi, replacement: 'گارانتی کامل ۱ ماهه' },
   {
-    pattern: /\b(?:1\s*MW|1\s*W|FW|FULL\s+WARRANTY)\b/gi,
+    pattern: /\b(?:1\s*W|FW|FULL\s+WARRANTY)\b/gi,
     replacement: 'گارانتی کامل',
   },
   { pattern: /\b(?:NW|NO\s+WARRANTY)\b/gi, replacement: 'بدون گارانتی' },

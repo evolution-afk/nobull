@@ -122,7 +122,7 @@ async function getUsdtRate(
   env: CatalogEnvironment,
   settings: Awaited<ReturnType<typeof getEffectiveSettings>>,
 ): Promise<number> {
-  if (settings.rateOverride || env.USDT_MODE !== 'auto') {
+  if (settings.rateOverride || settings.usdtMode !== 'auto') {
     return settings.manualRate
   }
   if (memoryRateCache && memoryRateCache.expiresAt > Date.now()) {

@@ -17,11 +17,17 @@ import {
   providerHeaders,
   providerRequestUrl,
   readAdminSettings,
+  getProfitMarginPercent,
+  listStoredOrders,
+  saveOrder,
+  upsertCustomer,
   writeAdminSettings,
   type AdminSettings,
   type BackendEnvironment,
   type ProviderConfig,
+  type StoredOrder,
 } from './_shared/settings'
+import { decideStoredOrder } from './_shared/orderActions'
 
 interface TelegramEnvironment extends BaseTelegramEnvironment, BackendEnvironment {
   TELEGRAM_WEBHOOK_SECRET?: string
@@ -68,6 +74,8 @@ interface CatalogProduct {
   name?: string
   title?: string
   product_name?: string
+  brand?: string
+  brand_name?: string
   category?: string
   category_name?: string
   price_toman?: number
@@ -91,6 +99,7 @@ interface ReceiptContext {
   productId: string
   providerId: string
   reference: string
+  orderId?: string
   status?: 'pending' | 'processing'
 }
 
@@ -174,7 +183,7 @@ function settingsSummary(
 ): string {
   const format = (value: number) => new Intl.NumberFormat('fa-IR').format(value)
   return [
-    `حالت نرخ: ${settings.rateOverride ? 'دستی (مدیریت ربات)' : env.USDT_MODE ?? 'manual'}`,
+    `حالت نرخ: ${settings.usdtMode === 'auto' ? 'خودکار' : 'دستی'}`,
     `نرخ تتر: ${format(settings.manualRate)} تومان`,
     `حاشیه سود پلکانی بر اساس قیمت دلاری:\n${settings.profitMarginTiers.map((percent, index) => {
       const tier = DEFAULT_PROFIT_MARGIN_TIERS[index]
@@ -476,14 +485,45 @@ async function startPurchase(
     product.name ?? product.title ?? product.product_name ?? `محصول ${id}`
   const usdPrice = Number(product.price_usd)
   const rate = Number(product.usdt_rate_used)
+  if (!Number.isFinite(usdPrice) || usdPrice < 0 || !Number.isFinite(rate) || rate <= 0) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      'اطلاعات قیمت پایه این محصول کامل نیست؛ فعلاً امکان صدور فاکتور دقیق وجود ندارد.',
+    )
+    return
+  }
   const settings = await getEffectiveSettings(env)
-  const priceToman =
-    Number.isFinite(usdPrice) &&
-    usdPrice >= 0 &&
-    Number.isFinite(rate) &&
-    rate > 0
-      ? calculateProductPriceToman(usdPrice, rate, settings)
-      : Number(product.price_toman)
+  const priceToman = calculateProductPriceToman(usdPrice, rate, settings)
+  const appliedMarginPercent = getProfitMarginPercent(usdPrice, settings)
+  const orderId = crypto.randomUUID()
+  const reference = `tg-${message.chat.id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
+  const order: StoredOrder = {
+    orderId,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'pending_receipt',
+    userId: String(message.chat.id),
+    username: message.from?.username ?? '',
+    firstName: message.from?.first_name ?? '',
+    productId: id,
+    productTitle: title,
+    brand: product.brand ?? product.brand_name ?? product.category_name ?? product.category ?? 'سایر',
+    provider: product.provider_id ?? 'dante',
+    priceUsd: usdPrice,
+    usdtRate: rate,
+    appliedMarginPercent,
+    priceToman,
+    estimatedProfitToman: priceToman - Math.round(usdPrice * rate),
+    reference,
+  }
+  await saveOrder(env, order)
+  await upsertCustomer(
+    env,
+    message.chat.id,
+    { username: order.username, firstName: order.firstName },
+    { totalOrders: 1 },
+  )
   const price = new Intl.NumberFormat('fa-IR').format(priceToman)
   const invoice = [
     '🧾 فاکتور خرید نوبول',
@@ -580,11 +620,36 @@ async function forwardReceipt(
     return
   }
 
+  const pendingOrders = await listStoredOrders(env)
+  const order = pendingOrders.find(
+    (candidate) =>
+      candidate.userId === String(message.chat.id) &&
+      candidate.productId === reference.productId &&
+      candidate.provider === reference.providerId &&
+      candidate.status === 'pending_receipt',
+  )
+  if (!order) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      'برای تطبیق رسید، ابتدا فاکتور همان محصول را از ربات دریافت کنید و رسید را در پاسخ به آن بفرستید.',
+    )
+    return
+  }
+  const waitingReview: StoredOrder = {
+    ...order,
+    status: 'waiting_review',
+    updatedAt: Date.now(),
+    username: message.from?.username ?? order.username,
+    firstName: message.from?.first_name ?? order.firstName,
+  }
+  await saveOrder(env, waitingReview)
   const token = await saveReceiptContext(env, {
     userChatId: String(message.chat.id),
     productId: reference.productId,
     providerId: reference.providerId,
-    reference: `tg-${message.chat.id}-${Date.now()}`,
+    reference: order.reference,
+    orderId: order.orderId,
   })
   const replyMarkup = {
     inline_keyboard: [
@@ -734,6 +799,18 @@ async function handleReceiptCallback(
 
   const adminChatId = env.TELEGRAM_ADMIN_CHAT_ID
   if (!adminChatId) throw new Error('Telegram admin chat is not configured.')
+  if (context.orderId) {
+    await decideStoredOrder(
+      env,
+      context.orderId,
+      action === 'approve' ? 'approve' : 'reject',
+    )
+    if (parts.length === 1) {
+      await env.NOBULL_SETTINGS?.delete(`nobull:receipt:${parts[0]}`)
+    }
+    if (update.message) await editCallbackMarkup(env, update.message)
+    return
+  }
   if (action === 'reject') {
     if (parts.length === 1) {
       await env.NOBULL_SETTINGS?.put(
@@ -849,6 +926,7 @@ async function parseCommandSettings(
     }
     next.manualRate = rate
     next.rateOverride = true
+    next.usdtMode = 'manual'
     await writeAdminSettings(env, next)
     console.info('Admin setting updated.', { action: 'setrate' })
     await sendMessage(env, chatId, `نرخ تتر روی ${new Intl.NumberFormat('fa-IR').format(rate)} تومان تنظیم شد.`)
@@ -1003,6 +1081,21 @@ export async function onRequestPost({
     const [rawCommand = '', ...args] = text.split(/\s+/)
     const command = rawCommand.split('@')[0].toLowerCase()
     const admin = isAdmin(env, message.from?.id)
+    try {
+      await upsertCustomer(
+        env,
+        message.chat.id,
+        {
+          username: message.from?.username,
+          firstName: message.from?.first_name,
+        },
+      )
+    } catch (error) {
+      console.error('Telegram customer activity tracking failed.', {
+        chatId: message.chat.id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+    }
     if (command === '/start') {
       try {
         await registerTelegramUser(env, message.chat.id)
@@ -1046,6 +1139,7 @@ export async function onRequestPost({
       }
       const settings = await readAdminSettings(env)
       delete settings.rateOverride
+      settings.usdtMode = 'auto'
       await writeAdminSettings(env, settings)
       console.info('Admin setting updated.', { action: 'autorate' })
       await sendMessage(env, message.chat.id, 'نرخ دستی غیرفعال شد؛ حالت نرخ محیط دوباره فعال است.')
