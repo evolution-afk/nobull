@@ -8,6 +8,10 @@ import {
   listStoredCustomers,
   listStoredOrders,
   readAdminSettings,
+  getProviders,
+  getProviderKey,
+  providerHeaders,
+  providerRequestUrl,
   writeAdminSettings,
   type AdminSettings,
   type StoredCustomer,
@@ -33,6 +37,17 @@ interface LoginThrottle {
 interface OtpRecord {
   digest: string
   expiresAt: number
+}
+
+interface ProviderWallet {
+  provider: string
+  configured: boolean
+  balance: number | null
+  currency: string | null
+  testCredit: number | string | boolean | null
+  testCreditActive: boolean | null
+  checkedAt: number
+  error: string | null
 }
 
 const SESSION_TTL_SECONDS = 12 * 60 * 60
@@ -370,14 +385,164 @@ async function getLiveProducts(request: Request) {
   }
 }
 
+function findValue(
+  value: unknown,
+  names: string[],
+  depth = 0,
+): unknown {
+  if (depth > 5 || !value || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findValue(item, names, depth + 1)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  const record = value as Record<string, unknown>
+  for (const [key, nested] of Object.entries(record)) {
+    if (names.includes(key.toLowerCase()) && nested !== null && nested !== undefined) {
+      return nested
+    }
+  }
+  for (const nested of Object.values(record)) {
+    const found = findValue(nested, names, depth + 1)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+function parseWallet(payload: unknown): Pick<
+  ProviderWallet,
+  'balance' | 'currency' | 'testCredit' | 'testCreditActive'
+> {
+  const balanceValue = findValue(payload, [
+    'balance',
+    'available_balance',
+    'availablebalance',
+    'credit',
+    'remaining_balance',
+    'remainingbalance',
+    'wallet_balance',
+    'walletbalance',
+  ])
+  const rawBalance =
+    typeof balanceValue === 'number' || typeof balanceValue === 'string'
+      ? Number(balanceValue)
+      : Number.NaN
+  const testCreditValue = findValue(payload, [
+    'test_credit',
+    'testcredit',
+    'test_balance',
+    'testbalance',
+    'trial_credit',
+    'trialcredit',
+  ])
+  const testModeValue = findValue(payload, [
+    'is_test',
+    'test_mode',
+    'istest',
+    'testmode',
+    'test_key',
+    'testkey',
+    'test_account',
+    'istestaccount',
+    'test_credit_active',
+    'testcreditactive',
+  ])
+  const testCredit =
+    typeof testCreditValue === 'number' ||
+    typeof testCreditValue === 'string' ||
+    typeof testCreditValue === 'boolean'
+      ? testCreditValue
+      : null
+  const testCreditActive =
+    typeof testModeValue === 'boolean'
+      ? testModeValue
+      : typeof testCreditValue === 'number'
+        ? testCreditValue > 0
+        : typeof testCreditValue === 'string' && testCreditValue.trim()
+          ? Number.isFinite(Number(testCreditValue))
+            ? Number(testCreditValue) > 0
+            : /active|enabled|available/i.test(testCreditValue)
+          : null
+  const currencyValue = findValue(payload, [
+    'currency',
+    'currency_code',
+    'currencycode',
+    'unit',
+  ])
+  return {
+    balance: Number.isFinite(rawBalance) ? rawBalance : null,
+    currency: typeof currencyValue === 'string' ? currencyValue : null,
+    testCredit,
+    testCreditActive,
+  }
+}
+
+async function getDanteWallet(env: AdminEnvironment): Promise<ProviderWallet> {
+  const checkedAt = Date.now()
+  const unavailable = (
+    error: string,
+    configured = Boolean(env.DANTE_KEY),
+  ): ProviderWallet => ({
+    provider: 'Dante Hub',
+    configured,
+    balance: null,
+    currency: null,
+    testCredit: null,
+    testCreditActive: null,
+    checkedAt,
+    error,
+  })
+
+  if (!env.DANTE_KEY) return unavailable('کلید Dante Hub پیکربندی نشده است.', false)
+  try {
+    const provider = getProviders(env).find(
+      (candidate) => candidate.id === 'dante' && candidate.apiKeyEnv === 'DANTE_KEY',
+    )
+    if (!provider?.balancePath) {
+      return unavailable('مسیر دریافت موجودی برای Dante Hub پیکربندی نشده است.')
+    }
+    const apiKey = getProviderKey(env, provider)
+    if (!apiKey) return unavailable('کلید دسترسی Dante Hub در دسترس نیست.', false)
+
+    const response = await fetch(providerRequestUrl(provider, provider.balancePath), {
+      method: 'GET',
+      headers: providerHeaders(provider, apiKey),
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!response.ok) {
+      return unavailable(`Dante Hub پاسخ ${response.status} برگرداند.`)
+    }
+    const parsed: unknown = await response.json()
+    const wallet = parseWallet(parsed)
+    return {
+      provider: provider.name,
+      configured: true,
+      ...wallet,
+      checkedAt: Date.now(),
+      error:
+        wallet.balance === null
+          ? 'پاسخ Dante Hub دریافت شد، اما مقدار موجودی قابل‌شناسایی نبود.'
+          : null,
+    }
+  } catch (error) {
+    console.error('Dante Hub balance request failed.', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return unavailable('دریافت موجودی Dante Hub موقتاً ناموفق بود.')
+  }
+}
+
 async function handleGet(request: Request, env: AdminEnvironment): Promise<Response> {
-  const [orders, storedCustomers, settings, subscriberCount, catalog] =
+  const [orders, storedCustomers, settings, subscriberCount, catalog, providerWallet] =
     await Promise.all([
       listStoredOrders(env),
       listStoredCustomers(env),
       getEffectiveSettings(env),
       listBotSubscriberCount(env),
       getLiveProducts(request),
+      getDanteWallet(env),
     ])
   const customers = await includeLegacySubscribers(env, storedCustomers)
   const catalogProducts = catalog.products.map((item) => {
@@ -406,6 +571,7 @@ async function handleGet(request: Request, env: AdminEnvironment): Promise<Respo
       updatedAt: settings.updatedAt ?? null,
     },
     catalog: { products: catalogProducts, rate: catalog.rate, error: catalog.error },
+    providerWallet,
   })
 }
 
@@ -468,6 +634,9 @@ export async function onRequestGet({
   }
   if (!(await authenticate(request, env))) {
     return jsonResponse({ error: 'نشست ورود معتبر نیست یا منقضی شده است.' }, 401)
+  }
+  if (new URL(request.url).searchParams.get('resource') === 'balance') {
+    return jsonResponse({ providerWallet: await getDanteWallet(env) })
   }
   try {
     return await handleGet(request, env)

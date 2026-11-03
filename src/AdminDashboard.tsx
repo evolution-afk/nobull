@@ -65,6 +65,17 @@ interface AdminCatalogProduct {
   status?: string
 }
 
+interface ProviderWallet {
+  provider: string
+  configured: boolean
+  balance: number | null
+  currency: string | null
+  testCredit: number | string | boolean | null
+  testCreditActive: boolean | null
+  checkedAt: number
+  error: string | null
+}
+
 interface AdminData {
   orders: AdminOrder[]
   customers: AdminCustomer[]
@@ -92,6 +103,7 @@ interface AdminData {
     rate: number | null
     error: string | null
   }
+  providerWallet: ProviderWallet
 }
 
 type AdminTab = 'sales' | 'customers' | 'pricing' | 'catalog'
@@ -184,6 +196,7 @@ function AdminDashboard() {
   const [catalogQuery, setCatalogQuery] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [pricing, setPricing] = useState<AdminData['pricing'] | null>(null)
+  const [refreshingBalance, setRefreshingBalance] = useState(false)
 
   useEffect(() => {
     if (!token) return
@@ -299,6 +312,27 @@ function AdminDashboard() {
       setError(cause instanceof Error ? cause.message : 'ارسال کد ناموفق بود.')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const refreshProviderBalance = async () => {
+    setRefreshingBalance(true)
+    try {
+      const response = await fetch('/api/admin?resource=balance', {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      })
+      const payload = (await response.json()) as { providerWallet?: ProviderWallet; error?: string }
+      if (!response.ok || !payload.providerWallet) {
+        throw new Error(payload.error || 'به‌روزرسانی موجودی ناموفق بود.')
+      }
+      setData((current) =>
+        current ? { ...current, providerWallet: payload.providerWallet! } : current,
+      )
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'به‌روزرسانی موجودی ناموفق بود.')
+    } finally {
+      setRefreshingBalance(false)
     }
   }
 
@@ -427,6 +461,11 @@ function AdminDashboard() {
         <div className="mt-10 py-12 text-center text-sm text-white/45">در حال بارگذاری داده‌های مدیریت…</div>
       ) : activeTab === 'sales' ? (
         <div className="mt-5 space-y-5">
+          <ProviderWalletCard
+            wallet={data.providerWallet}
+            refreshing={refreshingBalance}
+            onRefresh={() => void refreshProviderBalance()}
+          />
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {([
               ['today', 'امروز'],
@@ -571,6 +610,83 @@ function AdminDashboard() {
         </div>
       )}
     </section>
+  )
+}
+
+function ProviderWalletCard({
+  wallet,
+  refreshing,
+  onRefresh,
+}: {
+  wallet: ProviderWallet
+  refreshing: boolean
+  onRefresh: () => void
+}) {
+  const testCreditLabel =
+    wallet.testCredit === null
+      ? wallet.testCreditActive === true
+        ? 'حالت آزمایشی فعال'
+        : 'اطلاعات اعتبار آزمایشی ارائه نشده'
+      : typeof wallet.testCredit === 'boolean'
+        ? wallet.testCredit
+          ? 'اعتبار آزمایشی فعال'
+          : 'اعتبار آزمایشی غیرفعال'
+        : `اعتبار آزمایشی: ${wallet.testCredit} ${wallet.currency ?? 'واحد'}`
+
+  return (
+    <article className="relative overflow-hidden rounded-2xl border border-cyan-300/20 bg-[linear-gradient(115deg,rgba(8,40,43,0.82),rgba(10,17,20,0.96)_55%,rgba(13,25,30,0.96))] p-4 shadow-[0_12px_42px_rgba(0,242,255,0.06)] sm:p-5">
+      <div className="pointer-events-none absolute -left-8 -top-12 h-40 w-40 rounded-full bg-cyan-300/[0.07] blur-3xl" />
+      <div className="relative flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-[10px] font-semibold tracking-[0.14em] text-cyan-100/60">DANTE HUB • LIVE WALLET</p>
+          <h2 className="mt-1 text-base font-extrabold text-white sm:text-lg">
+            اعتبار کیف پول ارائه‌دهنده (Dante Hub)
+          </h2>
+          <p className="mt-1 text-[10px] text-white/40">
+            آخرین بررسی: {wallet.checkedAt ? formatDate(wallet.checkedAt) : 'هنوز بررسی نشده'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-2 rounded-xl border border-cyan-200/20 bg-cyan-200/[0.06] px-3 py-2 text-xs font-semibold text-cyan-50 transition hover:bg-cyan-200/[0.12] disabled:opacity-50"
+        >
+          <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+          بروزرسانی موجودی
+        </button>
+      </div>
+      <div className="relative mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+          <p className="text-[10px] text-white/45">موجودی زنده</p>
+          <p className="mt-1 text-xl font-extrabold text-cyan-100">
+            {wallet.balance === null
+              ? '—'
+              : `${new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 4 }).format(wallet.balance)} ${wallet.currency ?? 'USD'}`}
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+          <p className="text-[10px] text-white/45">اعتبار / کلید آزمایشی</p>
+          <p className={`mt-1 text-sm font-bold ${wallet.testCreditActive ? 'text-emerald-200' : 'text-white/75'}`}>
+            {testCreditLabel}
+          </p>
+          <p className="mt-1 text-[10px] text-white/35">
+            {wallet.testCreditActive === null
+              ? wallet.configured
+                ? 'وضعیت آزمایشی از پاسخ ارائه‌دهنده مشخص نشده است.'
+                : 'کلید Dante Hub پیکربندی نشده است.'
+              : wallet.testCreditActive
+                ? 'حساب یا اعتبار آزمایشی از پاسخ ارائه‌دهنده تشخیص داده شد.'
+                : 'اعتبار آزمایشی فعالی گزارش نشده است.'}
+          </p>
+        </div>
+      </div>
+      {wallet.error && (
+        <p role="status" className="relative mt-3 rounded-lg border border-amber-200/10 bg-amber-100/[0.04] px-3 py-2 text-[11px] leading-5 text-amber-100/80">
+          {wallet.error} اطلاعات فروشگاه همچنان در دسترس است.
+        </p>
+      )}
+    </article>
   )
 }
 
