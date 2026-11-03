@@ -9,7 +9,9 @@ import {
   type TelegramEnvironment as BaseTelegramEnvironment,
 } from './_shared/telegram'
 import {
+  DEFAULT_PROFIT_MARGIN_TIERS,
   getEffectiveSettings,
+  calculateProductPriceToman,
   getProviderKey,
   getProviders,
   providerHeaders,
@@ -69,6 +71,8 @@ interface CatalogProduct {
   category?: string
   category_name?: string
   price_toman?: number
+  price_usd?: number
+  usdt_rate_used?: number
   stock?: number | string | null
   quantity?: number | string | null
   in_stock?: boolean
@@ -172,7 +176,15 @@ function settingsSummary(
   return [
     `حالت نرخ: ${settings.rateOverride ? 'دستی (مدیریت ربات)' : env.USDT_MODE ?? 'manual'}`,
     `نرخ تتر: ${format(settings.manualRate)} تومان`,
-    `حاشیه سود: ${format(settings.profitMarginPercent ?? 0)}٪`,
+    `حاشیه سود پلکانی بر اساس قیمت دلاری:\n${settings.profitMarginTiers.map((percent, index) => {
+      const tier = DEFAULT_PROFIT_MARGIN_TIERS[index]
+      const range =
+        tier.maxUsd === null
+          ? `از ${format(tier.minUsd)} دلار`
+          : `${format(tier.minUsd)} تا کمتر از ${format(tier.maxUsd)} دلار`
+      return `• ${range}: ${format(percent)}٪`
+    }).join('\n')}`,
+    `حاشیه سود ثابت جایگزین: ${format(settings.profitMarginPercent ?? 0)}٪`,
     `کارمزد ثابت: ${format(settings.fixedFeeToman ?? 0)} تومان`,
     `شماره کارت: ${settings.cardNumber ?? env.ADMIN_CARD_NUMBER ?? 'تنظیم نشده'}`,
     `صاحب کارت: ${settings.cardHolder ?? env.ADMIN_CARD_HOLDER ?? 'تنظیم نشده'}`,
@@ -462,9 +474,17 @@ async function startPurchase(
   const id = String(product.provider_product_id ?? product.id)
   const title =
     product.name ?? product.title ?? product.product_name ?? `محصول ${id}`
-  const price = new Intl.NumberFormat('fa-IR').format(
-    Number(product.price_toman),
-  )
+  const usdPrice = Number(product.price_usd)
+  const rate = Number(product.usdt_rate_used)
+  const settings = await getEffectiveSettings(env)
+  const priceToman =
+    Number.isFinite(usdPrice) &&
+    usdPrice >= 0 &&
+    Number.isFinite(rate) &&
+    rate > 0
+      ? calculateProductPriceToman(usdPrice, rate, settings)
+      : Number(product.price_toman)
+  const price = new Intl.NumberFormat('fa-IR').format(priceToman)
   const invoice = [
     '🧾 فاکتور خرید نوبول',
     '',
@@ -654,7 +674,7 @@ async function handleAdminCallback(
     await sendMessage(
       env,
       chatId,
-      `تنظیمات قیمت:\n${settingsSummary(env, settings)}\n\nبرای تغییر نرخ: /setrate <تومان>\nبرای حاشیه سود: /setmargin <درصد>\nبرای بازگشت به نرخ محیط: /autorate`,
+      `تنظیمات قیمت:\n${settingsSummary(env, settings)}\n\nویرایش یک پله: /settier <شماره ۱ تا ۷> <درصد>\nتنظیم همه پله‌ها به یک درصد: /setmargin <درصد>\nتغییر نرخ: /setrate <تومان>\nبازگشت به نرخ محیط: /autorate`,
     )
     return
   }
@@ -841,9 +861,41 @@ async function parseCommandSettings(
       return true
     }
     next.profitMarginPercent = margin
+    next.profitMarginTiers = DEFAULT_PROFIT_MARGIN_TIERS.map(() => margin)
     await writeAdminSettings(env, next)
     console.info('Admin setting updated.', { action: 'setmargin' })
-    await sendMessage(env, chatId, `حاشیه سود روی ${new Intl.NumberFormat('fa-IR').format(margin)}٪ تنظیم شد.`)
+    await sendMessage(env, chatId, `همه پله‌های حاشیه سود روی ${new Intl.NumberFormat('fa-IR').format(margin)}٪ تنظیم شدند.`)
+    return true
+  }
+  if (command === '/settier') {
+    const tierNumber = numeric(args[0])
+    const margin = numeric(args[1])
+    if (
+      !Number.isInteger(tierNumber) ||
+      tierNumber < 1 ||
+      tierNumber > DEFAULT_PROFIT_MARGIN_TIERS.length ||
+      !Number.isFinite(margin) ||
+      margin < 0 ||
+      margin > 1000
+    ) {
+      await sendMessage(
+        env,
+        chatId,
+        'فرمت درست: /settier <شماره ۱ تا ۷> <درصد بین ۰ تا ۱۰۰۰>',
+      )
+      return true
+    }
+    const tiers =
+      (await getEffectiveSettings(env)).profitMarginTiers.slice()
+    tiers[tierNumber - 1] = margin
+    next.profitMarginTiers = tiers
+    await writeAdminSettings(env, next)
+    console.info('Admin setting updated.', { action: 'settier', tierNumber })
+    await sendMessage(
+      env,
+      chatId,
+      `حاشیه سود پله ${new Intl.NumberFormat('fa-IR').format(tierNumber)} روی ${new Intl.NumberFormat('fa-IR').format(margin)}٪ تنظیم شد.`,
+    )
     return true
   }
   if (command === '/setcard') {
@@ -971,7 +1023,7 @@ export async function onRequestPost({
       await sendAdminDashboard(env, message.chat.id)
       return jsonResponse({ ok: true })
     }
-    if (admin && ['/setrate', '/setmargin', '/setcard', '/setprovider'].includes(command)) {
+    if (admin && ['/setrate', '/setmargin', '/settier', '/setcard', '/setprovider'].includes(command)) {
       if (!env.NOBULL_SETTINGS) {
         await sendMessage(
           env,

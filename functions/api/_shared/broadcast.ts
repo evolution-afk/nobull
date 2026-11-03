@@ -1,6 +1,10 @@
 import { callTelegram } from './telegram'
 import type { TelegramEnvironment } from './telegram'
-import type { ProviderConfig } from './settings'
+import {
+  calculateProductPriceToman,
+  type AdminSettings,
+  type ProviderConfig,
+} from './settings'
 import { translateProductText } from '../../../src/utils/persianTranslator'
 
 export interface UserRegistryKV {
@@ -31,7 +35,12 @@ export interface BroadcastProduct {
   providerProductId: string
   provider: ProviderConfig
   source: Record<string, unknown>
-  priceToman: number
+  priceUsd: number
+  usdtRate: number
+  pricing: Pick<
+    AdminSettings,
+    'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+  >
 }
 
 const REGISTRATION_PREFIX = 'user:'
@@ -136,13 +145,18 @@ async function broadcastProduct(
     throw new Error('User registry or Telegram bot is not configured.')
   }
   const details = persianProductDetails(product)
+  const priceToman = calculateProductPriceToman(
+    product.priceUsd,
+    product.usdtRate,
+    product.pricing,
+  )
   const message = [
     '✨ محصول جدید به فروشگاه نوبول اضافه شد!',
     '',
     details.title,
     '',
     ...details.details,
-    `قیمت نهایی: ${new Intl.NumberFormat('fa-IR').format(product.priceToman)} تومان`,
+    `قیمت نهایی: ${new Intl.NumberFormat('fa-IR').format(priceToman)} تومان`,
     '',
     'قیمت شفاف، خرید با اطلاع از شرایط محصول.',
   ].join('\n')

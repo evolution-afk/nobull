@@ -59,6 +59,183 @@ const telegramBotUsername = import.meta.env.VITE_TELEGRAM_BOT_USERNAME?.replace(
 )
 const ALL_FILTER = 'all'
 
+interface ServiceGuide {
+  title: string
+  description: string
+  tips: string[]
+}
+
+const serviceGuides: Record<string, ServiceGuide> = {
+  openai: {
+    title: 'ChatGPT و سرویس‌های OpenAI',
+    description:
+      'چت‌بات و ابزارهای هوش مصنوعی برای پرسش‌وپاسخ، نوشتن، ترجمه، تحلیل و کمک در کارهای روزمره.',
+    tips: [
+      'ورود و دسترسی به قابلیت‌ها به نوع پلن و منطقه حساب بستگی دارد؛ قبل از خرید توضیحات همان محصول را بخوانید.',
+      'برای کاهش خطاهای ورود، از IP تمیز و ثابت استفاده کنید و مرتب کشور اتصال را عوض نکنید.',
+      'اشتراکی، دعوتی یا شخصی بودن را از عنوان و جزئیات همان پلن بررسی کنید؛ اسم برند به‌تنهایی چیزی را تضمین نمی‌کند.',
+    ],
+  },
+  x: {
+    title: 'Grok',
+    description:
+      'دستیار هوش مصنوعی پلتفرم X برای گفت‌وگو، جست‌وجوی موضوعات روز، ایده‌پردازی و تولید متن.',
+    tips: [
+      'دسترسی Grok به پلن و شرایط حساب X وابسته است؛ قبل از خرید، نوع دسترسی درج‌شده برای محصول را بررسی کنید.',
+      'با IP تمیز و ثابت وارد شوید و از جابه‌جایی مکرر کشور یا ورود هم‌زمان از چند دستگاه خودداری کنید.',
+      'در پلن‌های اشتراکی، اطلاعات ورود یا دعوت را با دیگران به اشتراک نگذارید.',
+    ],
+  },
+  claude: {
+    title: 'Claude',
+    description:
+      'دستیار هوش مصنوعی Anthropic برای نوشتن، تحلیل متن‌های طولانی، جمع‌بندی، ایده‌پردازی و کمک به کدنویسی.',
+    tips: [
+      'محدودیت‌ها و دسترسی به مدل‌ها به پلن و سیاست‌های منطقه‌ای بستگی دارد.',
+      'برای ثبات ورود، IP تمیز و ثابت داشته باشید و تغییر مداوم منطقه انجام ندهید.',
+      'قبل از سفارش مشخص کنید محصول شخصی، دعوتی یا اشتراکی است؛ این موارد بین پلن‌ها فرق می‌کند.',
+    ],
+  },
+  midjourney: {
+    title: 'Midjourney',
+    description:
+      'ابزار تولید تصویر با هوش مصنوعی؛ مناسب ساخت تصویر مفهومی، طراحی بصری و آزمودن ایده‌های هنری.',
+    tips: [
+      'روش دسترسی، سهمیه تولید و وضعیت خصوصی‌بودن تصاویر را در توضیحات پلن بخوانید.',
+      'اگر پلن از طریق دعوت یا فضای مشترک ارائه می‌شود، دستورها و تصاویرتان ممکن است برای اعضای دیگر قابل مشاهده باشد.',
+      'از IP تمیز و ثابت استفاده کنید و قوانین محتوایی سرویس را رعایت کنید.',
+    ],
+  },
+  canva: {
+    title: 'Canva',
+    description:
+      'ابزار طراحی آنلاین برای ساخت پست شبکه‌های اجتماعی، ارائه، پوستر، ویدیو و محتوای بازاریابی.',
+    tips: [
+      'امکانات حرفه‌ای و فضای تیمی به نوع پلن بستگی دارد؛ سهمیه و مدت را در جزئیات محصول بررسی کنید.',
+      'در پلن تیمی، فایل‌ها و طراحی‌ها ممکن است برای اعضای همان تیم قابل مشاهده باشند.',
+      'ورودهای مکرر از IP و کشور‌های مختلف می‌تواند بررسی امنیتی ایجاد کند؛ اتصال ثابت بهتر است.',
+    ],
+  },
+  spotify: {
+    title: 'Spotify',
+    description:
+      'سرویس پخش موسیقی و پادکست؛ پلن پریمیوم معمولاً امکاناتی مثل پخش بدون تبلیغ را ارائه می‌دهد.',
+    tips: [
+      'کشور حساب، روش فعال‌سازی و نوع پلن (شخصی یا خانوادگی) را پیش از خرید بررسی کنید.',
+      'در پلن خانوادگی، تغییر مکرر کشور یا ناسازگاری منطقه اعضا ممکن است باعث محدودیت شود.',
+      'رمز حساب را با افراد خارج از پلن به اشتراک نگذارید و اطلاعات بازیابی خود را نگه دارید.',
+    ],
+  },
+  youtube: {
+    title: 'YouTube Premium',
+    description:
+      'اشتراک یوتیوب برای تماشای بدون تبلیغ و استفاده از قابلیت‌های Premium؛ امکانات دقیق به کشور و نوع پلن وابسته است.',
+    tips: [
+      'روش فعال‌سازی و منطقه لازم را با توضیحات محصول تطبیق دهید؛ تغییر منطقه تضمین‌شده نیست.',
+      'پلن خانوادگی به اعضا و شرایط منطقه‌ای وابسته است؛ قبل از سفارش نوع دسترسی را بپرسید.',
+      'برای جلوگیری از هشدارهای امنیتی، کشور IP را مداوم تغییر ندهید.',
+    ],
+  },
+  perplexity: {
+    title: 'Perplexity',
+    description:
+      'موتور پاسخ‌گویی مبتنی بر هوش مصنوعی برای جست‌وجوی وب، جمع‌بندی و دریافت پاسخ همراه با منبع.',
+    tips: [
+      'تعداد جست‌وجوها و مدل‌های قابل انتخاب تابع پلن است؛ سهمیه محصول را بررسی کنید.',
+      'ورود پایدار با IP تمیز توصیه می‌شود؛ از اشتراک‌گذاری نشست یا کد ورود خودداری کنید.',
+      'شخصی یا اشتراکی بودن اکانت را از جزئیات همان محصول بسنجید.',
+    ],
+  },
+  cursor: {
+    title: 'Cursor',
+    description:
+      'ویرایشگر کد مجهز به هوش مصنوعی برای توضیح کد، تکمیل خودکار و کمک در تغییرات پروژه.',
+    tips: [
+      'سهمیه درخواست‌ها و مدل‌ها ممکن است با نوع پلن فرق کند؛ قبل از خرید محدودیت‌ها را بخوانید.',
+      'کد محرمانه یا کلیدهای دسترسی را در گفتگوها وارد نکنید مگر سیاست‌های تیم‌تان اجازه دهد.',
+      'اگر پلن تیمی یا اشتراکی است، درباره دسترسی اعضا و حریم خصوصی workspace سؤال کنید.',
+    ],
+  },
+  netflix: {
+    title: 'Netflix',
+    description:
+      'سرویس پخش فیلم و سریال؛ دسترسی به محتوا و امکانات می‌تواند با کشور حساب و نوع اشتراک تغییر کند.',
+    tips: [
+      'نوع اکانت، تعداد نمایشگر و روش تحویل را در مشخصات همان محصول ببینید.',
+      'در اکانت اشتراکی، پروفایل و رمز را تغییر ندهید مگر فروشنده صریحاً اجازه داده باشد.',
+      'IP و منطقه را پیوسته عوض نکنید؛ تغییرات غیرعادی ممکن است تأیید امنیتی بخواهد.',
+    ],
+  },
+  capcut: {
+    title: 'CapCut',
+    description:
+      'ابزار تدوین ویدیو برای ساخت کلیپ‌های کوتاه، افزودن افکت، زیرنویس و آماده‌سازی محتوا برای شبکه‌های اجتماعی.',
+    tips: [
+      'امکانات Pro و مدت فعال‌سازی به نوع محصول بستگی دارد؛ جزئیات را قبل از پرداخت بررسی کنید.',
+      'در دسترسی تیمی، پروژه‌ها یا فضای کاری ممکن است مشترک باشد.',
+      'از IP تمیز و ثابت استفاده کنید و برای تحویل، ایمیل درست و در دسترس ارائه دهید.',
+    ],
+  },
+}
+
+const categoryGuides: Record<string, ServiceGuide> = {
+  'هوش مصنوعی': {
+    title: 'راهنمای سرویس‌های هوش مصنوعی',
+    description:
+      'این دسته شامل ابزارهای گفت‌وگو، جست‌وجو، تولید تصویر و کمک به نوشتن یا برنامه‌نویسی است؛ کاربرد و محدودیت هر برند متفاوت است.',
+    tips: [
+      'قبل از خرید، سهمیه، مدت، روش ورود و شخصی یا اشتراکی بودن را در مشخصات همان محصول بخوانید.',
+      'از IP تمیز و ثابت استفاده کنید و مرتب کشور اتصال را عوض نکنید.',
+      'اطلاعات حساس، رمزها و داده‌های محرمانه را در سرویس یا حساب اشتراکی وارد نکنید.',
+    ],
+  },
+  'برنامه‌نویسی': {
+    title: 'راهنمای ابزارهای برنامه‌نویسی',
+    description:
+      'ابزارهای این دسته برای تکمیل کد، مرور پروژه، ساخت نرم‌افزار و همکاری توسعه‌دهندگان استفاده می‌شوند.',
+    tips: [
+      'سهمیه، مدل‌های در دسترس و مجوز استفاده تجاری را با پلن محصول تطبیق دهید.',
+      'کلید API، رمز عبور و کد محرمانه را در workspace یا گفت‌وگوی مشترک قرار ندهید.',
+      'تیمی یا شخصی بودن اشتراک و دسترسی اعضا را پیش از سفارش روشن کنید.',
+    ],
+  },
+  'موسیقی و ویدیو': {
+    title: 'راهنمای اشتراک‌های موسیقی و ویدیو',
+    description:
+      'این سرویس‌ها برای پخش موسیقی، فیلم و محتوای آنلاین هستند؛ کتابخانه محتوا و شرایط پلن به منطقه و روش فعال‌سازی وابسته است.',
+    tips: [
+      'منطقه حساب، نوع پلن و تعداد کاربران مجاز را قبل از خرید بررسی کنید.',
+      'در اکانت اشتراکی، رمز یا تنظیمات امنیتی را بدون هماهنگی تغییر ندهید.',
+      'کشور اتصال را مرتب عوض نکنید تا بررسی‌های امنیتی کمتر شوند.',
+    ],
+  },
+  'طراحی و گرافیک': {
+    title: 'راهنمای ابزارهای طراحی',
+    description:
+      'ابزارهای طراحی برای ساخت گرافیک، ارائه، تصویر و ویدیو به‌کار می‌روند؛ امکانات حرفه‌ای و فضای تیمی در هر پلن متفاوت است.',
+    tips: [
+      'مالکیت فایل‌ها، فضای تیمی و میزان دسترسی سایر اعضا را بررسی کنید.',
+      'پیش از سفارش، مدت و امکانات دقیق پلن را از عنوان و توضیحات محصول بسنجید.',
+      'برای جلوگیری از قفل امنیتی، از IP تمیز و ثابت استفاده کنید.',
+    ],
+  },
+}
+
+function getServiceGuide(brandKey: string, brand: string, category: string): ServiceGuide {
+  return (
+    serviceGuides[brandKey] ??
+    categoryGuides[category] ?? {
+      title: `معرفی ${brand}`,
+      description: `${brand} از سرویس‌های دیجیتال این فروشگاه است. کاربرد، امکانات و محدودیت‌ها به نوع پلن عرضه‌شده بستگی دارد؛ توضیحات همان محصول را مبنا قرار دهید.`,
+      tips: [
+        'پیش از پرداخت، مدت، روش تحویل و شخصی، دعوتی یا اشتراکی بودن را از مشخصات دقیق محصول بررسی کنید.',
+        'از IP تمیز و ثابت استفاده کنید و برای ورود، منطقه اتصال را مرتب تغییر ندهید.',
+        'در حساب‌های اشتراکی اطلاعات حساس وارد نکنید و رمز یا تنظیمات حساب را بدون هماهنگی تغییر ندهید.',
+      ],
+    }
+  )
+}
+
 function getPersianCategory(asset: BrandAsset, source: string): string {
   const category = `${asset.categoryLabel} ${source}`.toLocaleLowerCase()
   if (/هوش مصنوعی|artificial intelligence|\bai\b/.test(category)) {
@@ -377,6 +554,19 @@ function App() {
       }),
     [products],
   )
+  const activeBrand = brandGroups.find(
+    (group) => group.brandKey === selectedBrand,
+  )
+  const activeGuide =
+    selectedBrand !== ALL_FILTER
+      ? getServiceGuide(
+          selectedBrand,
+          activeBrand?.brand ?? selectedBrand,
+          activeBrand?.asset.categoryLabel ?? selectedCategory,
+        )
+      : selectedCategory !== ALL_FILTER
+        ? getServiceGuide('', selectedCategory, selectedCategory)
+        : null
   const totpCode =
     now > 0 ? (totpResult.totp?.generate({ timestamp: now }) ?? '') : ''
   const totpPeriod = totpResult.totp?.period ?? 30
@@ -602,6 +792,7 @@ function App() {
                       onClick={() => {
                         setSelectedBrand(brandKey)
                         setSelectedCategory(ALL_FILTER)
+                        setQuery('')
                         scrollToProducts()
                       }}
                       className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-[11px] transition ${
@@ -644,6 +835,8 @@ function App() {
                     type="button"
                     onClick={() => {
                       setSelectedCategory(item.key)
+                      setSelectedBrand(ALL_FILTER)
+                      setQuery('')
                       scrollToProducts()
                     }}
                     aria-pressed={selectedCategory === item.key}
@@ -678,6 +871,7 @@ function App() {
                       onClick={() => {
                         setSelectedBrand(brandKey)
                         setSelectedCategory(ALL_FILTER)
+                        setQuery('')
                         scrollToProducts()
                       }}
                       className={`rounded-2xl border bg-zinc-950/75 p-4 text-right transition-all hover:border-primary/45 hover:shadow-[0_0_25px_rgba(0,242,255,0.08)] ${
@@ -711,6 +905,37 @@ function App() {
                     </button>
                   ))}
                 </div>
+              </section>
+            )}
+
+            {activeGuide && (
+              <section className="mt-7 rounded-2xl border border-primary/20 bg-[linear-gradient(135deg,rgba(0,242,255,0.07),rgba(8,11,12,0.92)_48%)] p-5 shadow-[0_0_35px_rgba(0,242,255,0.045)] sm:p-6">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/25 bg-primary/[0.08] text-primary">
+                    <CircleHelp size={20} />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-semibold tracking-[0.16em] text-primary/75">
+                      SERVICE GUIDE • راهنمای بی‌تعارف
+                    </p>
+                    <h2 className="mt-1 text-base font-bold text-white sm:text-lg">
+                      معرفی سرویس و نکات استفاده: {activeGuide.title}
+                    </h2>
+                    <p className="mt-2 text-xs leading-7 text-white/65">
+                      {activeGuide.description}
+                    </p>
+                  </div>
+                </div>
+                <ul className="mt-4 grid gap-2 sm:grid-cols-3">
+                  {activeGuide.tips.map((tip) => (
+                    <li
+                      key={tip}
+                      className="rounded-xl border border-white/[0.07] bg-black/25 px-3 py-2.5 text-[10px] leading-6 text-white/55"
+                    >
+                      {tip}
+                    </li>
+                  ))}
+                </ul>
               </section>
             )}
 
@@ -755,9 +980,14 @@ function App() {
                     onClick={resetFilters}
                     className="text-[11px] font-semibold text-primary transition hover:text-white"
                   >
-                    حذف فیلترها (نمایش همه)
+                    همه محصولات
                   </button>
                 </div>
+              )}
+              {copyMessage && hasActiveFilters && (
+                <p role="status" className="mt-3 text-[11px] text-primary/80">
+                  {copyMessage}
+                </p>
               )}
 
               {catalogError ? (
@@ -792,6 +1022,11 @@ function App() {
                       key={product.id}
                       product={product}
                       onSelect={() => setSelectedProduct(product)}
+                      directActions={
+                        selectedBrand !== ALL_FILTER ||
+                        selectedCategory !== ALL_FILTER
+                      }
+                      onCopy={(value, message) => void copyText(value, message)}
                     />
                   ))}
                 </div>
@@ -1024,9 +1259,13 @@ function SectionHeading({
 function ProductCard({
   product,
   onSelect,
+  directActions,
+  onCopy,
 }: {
   product: Product
   onSelect: () => void
+  directActions: boolean
+  onCopy: (value: string, successMessage: string) => void
 }) {
   const isAvailable = product.status === 'available'
   const isUnknown = product.status === 'unknown'
@@ -1114,15 +1353,51 @@ function ProductCard({
             {formatToman(product.price_toman)}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onSelect}
-          disabled={product.status === 'unavailable'}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#00F2FF] px-3.5 py-2.5 text-[10px] font-bold text-black transition-all hover:bg-[#00D4E0] hover:shadow-[0_0_20px_rgba(0,242,255,0.4)] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30 disabled:shadow-none"
-        >
-          <span>خرید آنی</span>
-          <ArrowUpLeft size={13} />
-        </button>
+        {directActions ? (
+          <div className="flex shrink-0 gap-1.5">
+            <a
+              href={telegramUrl(product) ?? undefined}
+              target="_blank"
+              rel="noreferrer"
+              aria-disabled={product.status === 'unavailable'}
+              onClick={(event) => {
+                if (product.status === 'unavailable') event.preventDefault()
+              }}
+              className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-2.5 text-[9px] font-bold transition ${
+                product.status === 'unavailable'
+                  ? 'cursor-not-allowed bg-white/10 text-white/30'
+                  : 'bg-[#00F2FF] text-black hover:bg-[#00D4E0]'
+              }`}
+            >
+              خرید در تلگرام
+              <ArrowUpLeft size={12} />
+            </a>
+            <button
+              type="button"
+              onClick={() =>
+                onCopy(
+                  telegramUrl(product) ?? '',
+                  'لینک خرید تلگرام کپی شد.',
+                )
+              }
+              className="inline-flex items-center justify-center rounded-xl border border-primary/25 px-2.5 text-primary transition hover:bg-primary/10"
+              aria-label={`کپی لینک خرید ${persianTitle}`}
+              title="کپی لینک خرید"
+            >
+              <Copy size={14} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onSelect}
+            disabled={product.status === 'unavailable'}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#00F2FF] px-3.5 py-2.5 text-[10px] font-bold text-black transition-all hover:bg-[#00D4E0] hover:shadow-[0_0_20px_rgba(0,242,255,0.4)] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30 disabled:shadow-none"
+          >
+            <span>خرید آنی</span>
+            <ArrowUpLeft size={13} />
+          </button>
+        )}
       </div>
     </article>
   )

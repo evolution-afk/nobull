@@ -5,6 +5,7 @@ import {
 } from './_shared/broadcast'
 import {
   getEffectiveSettings,
+  calculateProductPriceToman,
   getProviderKey,
   getProviders,
   providerHeaders,
@@ -61,6 +62,7 @@ const PRODUCT_FIELDS = [
   'purchase_url',
   'telegram_url',
   'mini_app_url',
+  'price_usd',
 ] as const
 
 let memoryRateCache: { rate: number; expiresAt: number } | null = null
@@ -186,7 +188,7 @@ function calculateProducts(
   return products.flatMap((product) => {
     const record = asRecord(product)
     if (!record) return []
-    const price = Number(record.price ?? record.usdt_price)
+    const price = Number(record.price_usd ?? record.price ?? record.usdt_price)
     if (!Number.isFinite(price) || price < 0) return []
 
     const rawId = record.id ?? record.product_id ?? record.uuid
@@ -200,14 +202,8 @@ function calculateProducts(
     }
     clean.provider_id = provider.id
     clean.provider_name = provider.name
-    clean.price_toman =
-      Math.ceil(
-        (price *
-          usdtRate *
-          (1 + (settings.profitMarginPercent ?? 0) / 100) +
-          (settings.fixedFeeToman ?? 0)) /
-          1000,
-      ) * 1000
+    clean.price_usd = price
+    clean.price_toman = calculateProductPriceToman(price, usdtRate, settings)
     clean.usdt_rate_used = usdtRate
     return [clean]
   })
@@ -324,7 +320,9 @@ export async function onRequestGet({
             providerProductId: String(product.provider_product_id),
             provider,
             source: product,
-            priceToman: Number(product.price_toman),
+            priceUsd: Number(product.price_usd),
+            usdtRate,
+            pricing: settings,
           })),
     )
     const broadcast = detectAndBroadcastProducts(env, newProductCandidates)

@@ -24,6 +24,7 @@ export interface AdminSettings {
   manualRate?: number
   rateOverride?: boolean
   profitMarginPercent?: number
+  profitMarginTiers?: number[]
   fixedFeeToman?: number
   cardNumber?: string
   cardHolder?: string
@@ -45,6 +46,18 @@ export interface BackendEnvironment {
 }
 
 const SETTINGS_KEY = 'nobull:admin-settings:v1'
+
+export const DEFAULT_PROFIT_MARGIN_TIERS = [
+  { minUsd: 0, maxUsd: 1, percent: 25 },
+  { minUsd: 1, maxUsd: 2, percent: 20 },
+  { minUsd: 2, maxUsd: 3, percent: 15 },
+  { minUsd: 3, maxUsd: 5, percent: 12 },
+  { minUsd: 5, maxUsd: 8, percent: 10 },
+  { minUsd: 8, maxUsd: 12, percent: 8 },
+  { minUsd: 12, maxUsd: null, percent: 5 },
+] as const
+
+export type EffectiveSettings = Awaited<ReturnType<typeof getEffectiveSettings>>
 
 export async function readAdminSettings(
   env: BackendEnvironment,
@@ -69,9 +82,15 @@ export async function writeAdminSettings(
 export async function getEffectiveSettings(
   env: BackendEnvironment,
 ): Promise<Required<
-  Pick<AdminSettings, 'manualRate' | 'profitMarginPercent' | 'fixedFeeToman'>
+  Pick<
+    AdminSettings,
+    'manualRate' | 'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+  >
 > &
-  Omit<AdminSettings, 'manualRate' | 'profitMarginPercent' | 'fixedFeeToman'>> {
+  Omit<
+    AdminSettings,
+    'manualRate' | 'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+  >> {
   const stored = await readAdminSettings(env)
   const manualRate = Number(env.MANUAL_USDT_TOMAN ?? '68000')
   const margin = Number(env.PROFIT_MARGIN_PERCENT ?? '0')
@@ -79,6 +98,17 @@ export async function getEffectiveSettings(
   const storedRate = Number(stored.manualRate)
   const storedMargin = Number(stored.profitMarginPercent)
   const storedFee = Number(stored.fixedFeeToman)
+  const profitMarginTiers = DEFAULT_PROFIT_MARGIN_TIERS.map(
+    (tier, index) => {
+      const storedTier = stored.profitMarginTiers?.[index]
+      return typeof storedTier === 'number' &&
+        Number.isFinite(storedTier) &&
+        storedTier >= 0 &&
+        storedTier <= 1000
+        ? storedTier
+        : tier.percent
+    },
+  )
   return {
     ...stored,
     manualRate:
@@ -89,10 +119,47 @@ export async function getEffectiveSettings(
         ? storedMargin
         : undefined) ??
       (Number.isFinite(margin) && margin >= 0 ? margin : 0),
+    profitMarginTiers,
     fixedFeeToman:
       (Number.isFinite(storedFee) && storedFee >= 0 ? storedFee : undefined) ??
       (Number.isFinite(fee) && fee >= 0 ? fee : 0),
   }
+}
+
+export function getProfitMarginPercent(
+  priceUsd: number,
+  settings: Pick<AdminSettings, 'profitMarginPercent' | 'profitMarginTiers'>,
+): number {
+  if (!Number.isFinite(priceUsd) || priceUsd < 0) {
+    return settings.profitMarginPercent ?? 0
+  }
+  const tierIndex = DEFAULT_PROFIT_MARGIN_TIERS.findIndex(
+    ({ minUsd, maxUsd }) => priceUsd >= minUsd && (maxUsd === null || priceUsd < maxUsd),
+  )
+  const tierMargin =
+    tierIndex >= 0 ? settings.profitMarginTiers?.[tierIndex] : undefined
+  return Number.isFinite(tierMargin)
+    ? tierMargin!
+    : settings.profitMarginPercent ?? 0
+}
+
+export function calculateProductPriceToman(
+  priceUsd: number,
+  usdtRate: number,
+  settings: Pick<
+    AdminSettings,
+    'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+  >,
+): number {
+  return (
+    Math.ceil(
+      (priceUsd *
+        usdtRate *
+        (1 + getProfitMarginPercent(priceUsd, settings) / 100) +
+        (settings.fixedFeeToman ?? 0)) /
+        1000,
+    ) * 1000
+  )
 }
 
 function isProviderConfig(value: unknown): value is ProviderConfig {
@@ -213,6 +280,7 @@ export function settingsRevision(settings: AdminSettings): string {
     settings.manualRate ?? 0,
     settings.rateOverride ? 1 : 0,
     settings.profitMarginPercent ?? 0,
+    ...(settings.profitMarginTiers ?? []),
     settings.fixedFeeToman ?? 0,
     settings.activeProviderId ?? '',
   ].join('-')
