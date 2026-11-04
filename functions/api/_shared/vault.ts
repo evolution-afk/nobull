@@ -54,9 +54,9 @@ export async function decryptDelivery(
 ): Promise<unknown> {
   if (!secret) throw new Error('VAULT_ENCRYPTION_KEY is not configured.')
   const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: fromBase64Url(value.iv) },
+    { name: 'AES-GCM', iv: new Uint8Array(fromBase64Url(value.iv)) },
     await vaultKey(secret),
-    fromBase64Url(value.ciphertext),
+    new Uint8Array(fromBase64Url(value.ciphertext)),
   )
   return JSON.parse(new TextDecoder().decode(decrypted)) as unknown
 }
@@ -73,6 +73,9 @@ const credentialLabels: Record<string, string> = {
   link: 'لینک ورود',
   two_fa: 'کد دومرحله‌ای',
   '2fa': 'کد دومرحله‌ای',
+  '2fa_secret': 'کلید ورود دومرحله‌ای',
+  twofa_secret: 'کلید ورود دومرحله‌ای',
+  two_factor_secret: 'کلید ورود دومرحله‌ای',
   two_fa_secret: 'کلید ورود دومرحله‌ای',
   recovery_code: 'کد بازیابی',
   totp: 'کد یک‌بارمصرف',

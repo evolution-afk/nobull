@@ -1,4 +1,8 @@
-import { listStoredOrders, type BackendEnvironment } from './_shared/settings'
+import {
+  getUserWallet,
+  listStoredOrders,
+  type BackendEnvironment,
+} from './_shared/settings'
 import { verifyTelegramWebAppInitData } from './_shared/telegramAuth'
 import { decryptDelivery, extractVaultCredentials } from './_shared/vault'
 
@@ -26,7 +30,7 @@ export async function onRequestPost({
   request,
   env,
 }: AccountContext): Promise<Response> {
-  if (!env.NOBULL_SETTINGS?.list) {
+  if (!env.NOBULL_SETTINGS) {
     return jsonResponse({ error: 'سابقه خرید در دسترس نیست.' }, 503)
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
@@ -52,7 +56,13 @@ export async function onRequestPost({
   }
 
   try {
-    const orders = (await listStoredOrders(env)).filter(
+    const [allOrders, wallet] = await Promise.all([
+      listStoredOrders(env),
+      env.NOBULL_WALLET_DB
+        ? getUserWallet(env, user.id)
+        : Promise.resolve(null),
+    ])
+    const orders = allOrders.filter(
       (order) => order.userId === user.id,
     )
     const result = await Promise.all(
@@ -79,6 +89,7 @@ export async function onRequestPost({
     )
     return jsonResponse({
       user: { firstName: user.firstName },
+      wallet,
       orders: result,
       vaultAvailable: Boolean(env.VAULT_ENCRYPTION_KEY),
     })

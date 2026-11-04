@@ -64,6 +64,23 @@ interface ProductRecord {
   [key: string]: unknown
 }
 
+interface AccountOrder {
+  orderId: string
+  productTitle: string
+  createdAt: number
+  priceToman: number
+  status: string
+  credentials: Array<{ label: string; value: string }>
+  credentialsArchived: boolean
+}
+
+interface AccountResponse {
+  user: { firstName: string }
+  wallet: { balanceToman: number; totalSpentToman: number; ordersCount: number } | null
+  orders: AccountOrder[]
+  vaultAvailable: boolean
+}
+
 const telegramBotUsername = import.meta.env.VITE_TELEGRAM_BOT_USERNAME?.replace(
   /^@/,
   '',
@@ -767,7 +784,7 @@ function telegramUrl(product: Product, discountCode?: string): string | null {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'catalog' | '2fa' | 'admin'>(() =>
+  const [activeTab, setActiveTab] = useState<'catalog' | '2fa' | 'account' | 'admin'>(() =>
     window.location.hash === '#admin' ? 'admin' : 'catalog',
   )
   const [products, setProducts] = useState<Product[]>([])
@@ -784,6 +801,46 @@ function App() {
   const [now, setNow] = useState(0)
   const [copyMessage, setCopyMessage] = useState('')
   const [featuredIndex, setFeaturedIndex] = useState(0)
+  const [accountData, setAccountData] = useState<AccountResponse | null>(null)
+  const [accountLoading, setAccountLoading] = useState(false)
+  const [accountError, setAccountError] = useState('')
+  const telegramInitData = (
+    window as Window & {
+      Telegram?: { WebApp?: { initData?: string; ready?: () => void } }
+    }
+  ).Telegram?.WebApp?.initData
+  const accountErrorMessage =
+    accountError ||
+    (!telegramInitData
+      ? 'برای حفظ امنیت اطلاعات، این بخش را از فروشگاه داخل ربات تلگرام باز کنید.'
+      : '')
+
+  const loadAccount = () => {
+    if (!telegramInitData) return
+    const controller = new AbortController()
+    setAccountLoading(true)
+    setAccountError('')
+    void fetch('/api/account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: telegramInitData }),
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as AccountResponse & { error?: string }
+        if (!response.ok) throw new Error(payload.error || 'دریافت اطلاعات حساب ناموفق بود.')
+        return payload
+      })
+      .then(setAccountData)
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setAccountError(error instanceof Error ? error.message : 'دریافت اطلاعات حساب ناموفق بود.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAccountLoading(false)
+      })
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1086,6 +1143,23 @@ function App() {
           >
             <ShoppingBag size={16} />
             کاتالوگ اشتراک‌ها
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+              setActiveTab('account')
+              loadAccount()
+            }}
+            aria-current={activeTab === 'account' ? 'page' : undefined}
+            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
+              activeTab === 'account'
+                ? 'border-primary/40 bg-primary/[0.1] text-primary shadow-[0_0_22px_rgba(0,242,255,0.07)]'
+                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
+            }`}
+          >
+            <PackageCheck size={16} />
+            حساب کاربری و خریدهای من
           </button>
           <button
             type="button"
@@ -1600,6 +1674,58 @@ function App() {
               )}
             </section>
           </>
+        ) : activeTab === 'account' ? (
+          <section className="mx-auto mt-8 max-w-4xl rounded-[28px] border border-white/[0.1] bg-[#080b0c]/90 p-5 shadow-[0_24px_100px_rgba(0,0,0,0.65)] sm:mt-12 sm:p-8">
+            <div className="flex items-start gap-3">
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-primary/25 bg-primary/[0.08] text-primary">
+                <PackageCheck size={23} />
+              </span>
+              <div>
+                <p className="text-xs font-semibold text-primary">حساب کاربری نوبول</p>
+                <h1 className="mt-1 text-xl font-bold">خریدهای من و گاوصندوق اطلاعات</h1>
+                {accountData?.user.firstName && <p className="mt-2 text-xs text-white/50">{accountData.user.firstName} عزیز</p>}
+              </div>
+            </div>
+            {accountLoading ? (
+              <p className="mt-7 rounded-2xl border border-white/[0.08] p-5 text-sm text-white/55">در حال دریافت امن اطلاعات حساب…</p>
+            ) : accountErrorMessage ? (
+              <p role="alert" className="mt-7 rounded-2xl border border-amber-300/15 bg-amber-300/[0.04] p-5 text-sm leading-7 text-amber-100/80">{accountErrorMessage}</p>
+            ) : accountData ? (
+              <>
+                <div className="mt-6 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4"><p className="text-xs text-white/45">موجودی کیف پول</p><p className="mt-2 font-bold text-emerald-100">{new Intl.NumberFormat('fa-IR').format(accountData.wallet?.balanceToman ?? 0)} تومان</p></div>
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4"><p className="text-xs text-white/45">مجموع خرید کیف پول</p><p className="mt-2 font-bold">{new Intl.NumberFormat('fa-IR').format(accountData.wallet?.totalSpentToman ?? 0)} تومان</p></div>
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4"><p className="text-xs text-white/45">تعداد سفارش‌ها</p><p className="mt-2 font-bold">{new Intl.NumberFormat('fa-IR').format(accountData.orders.length)}</p></div>
+                </div>
+                {!accountData.vaultAvailable && <p className="mt-4 rounded-xl border border-amber-300/15 bg-amber-300/[0.04] p-3 text-xs leading-6 text-amber-100/75">گاوصندوق اطلاعات هنوز در سرور فعال نشده است؛ سفارش‌ها نمایش داده می‌شوند اما اطلاعات تحویل بایگانی‌شده در دسترس نیست.</p>}
+                <h2 className="mt-8 text-base font-bold">سوابق سفارش و اطلاعات تحویل</h2>
+                <div className="mt-3 space-y-3">
+                  {accountData.orders.map((order) => (
+                    <article key={order.orderId} className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div><h3 className="font-semibold">{order.productTitle}</h3><p className="mt-1 text-[11px] text-white/45">{new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium', timeStyle: 'short' }).format(order.createdAt)}</p></div>
+                        <span className="text-xs font-semibold text-primary">{new Intl.NumberFormat('fa-IR').format(order.priceToman)} تومان</span>
+                      </div>
+                      {order.credentials.length ? (
+                        <dl className="mt-4 grid gap-2 sm:grid-cols-2">
+                          {order.credentials.map((credential, index) => (
+                            <div key={`${credential.label}-${index}`} className="min-w-0 rounded-xl border border-white/[0.07] bg-black/30 p-3">
+                              <dt className="text-[10px] text-white/45">{credential.label}</dt>
+                              <dd dir="auto" className="mt-1 break-all text-xs text-white/85">{credential.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : (
+                        <p className="mt-3 text-xs leading-6 text-white/45">{order.status === 'completed' ? 'جزئیات تحویل برای این سفارش در گاوصندوق ثبت نشده است.' : 'پس از تکمیل سفارش، اطلاعات تحویل در این بخش نمایش داده می‌شود.'}</p>
+                      )}
+                    </article>
+                  ))}
+                  {!accountData.orders.length && <p className="rounded-2xl border border-white/[0.08] p-5 text-sm text-white/45">هنوز سفارشی برای این حساب ثبت نشده است.</p>}
+                </div>
+                <p className="mt-5 text-[10px] leading-5 text-white/35">اطلاعات تحویل فقط پس از احراز هویت با نشست معتبر تلگرام نمایش داده می‌شود و در سرور به‌صورت رمزگذاری‌شده نگهداری می‌شود.</p>
+              </>
+            ) : null}
+          </section>
         ) : activeTab === '2fa' ? (
           <section className="mx-auto mt-8 max-w-2xl rounded-[28px] border border-white/[0.1] bg-[#080b0c]/90 p-5 shadow-[0_24px_100px_rgba(0,0,0,0.65),0_0_45px_rgba(0,242,255,0.05)] sm:mt-12 sm:p-8">
             <div className="text-center">

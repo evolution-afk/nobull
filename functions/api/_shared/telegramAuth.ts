@@ -57,7 +57,7 @@ export async function verifyTelegramWebAppInitData(
     const valid = await crypto.subtle.verify(
       'HMAC',
       verificationKey,
-      suppliedHash,
+      new Uint8Array(suppliedHash),
       new TextEncoder().encode(dataCheckString),
     )
     if (!valid) return null

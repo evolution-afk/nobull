@@ -12,6 +12,7 @@ import {
   applyDiscountToPrice,
   DEFAULT_PROFIT_MARGIN_TIERS,
   findActiveDiscountCode,
+  getUserWallet,
   getEffectiveSettings,
   calculateProductPriceToman,
   getProviderKey,
@@ -19,6 +20,7 @@ import {
   providerHeaders,
   providerRequestUrl,
   readAdminSettings,
+  recordWalletPurchase,
   getProfitMarginPercent,
   listStoredOrders,
   saveOrder,
@@ -219,6 +221,71 @@ function settingsSummary(
     `صاحب کارت: ${settings.cardHolder ?? env.ADMIN_CARD_HOLDER ?? 'تنظیم نشده'}`,
     `ذخیره پایدار: ${env.NOBULL_SETTINGS ? 'فعال' : 'غیرفعال؛ NOBULL_SETTINGS KV لازم است'}`,
   ].join('\n')
+}
+
+async function telegramOrderId(
+  updateId: number,
+  chatId: number,
+  productKey: string,
+): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(`${chatId}:${updateId}:${productKey}`),
+    ),
+  ).slice(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const hex = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+async function sendWalletStatus(
+  env: TelegramEnvironment,
+  chatId: number,
+): Promise<void> {
+  if (!env.NOBULL_WALLET_DB) {
+    await sendMessage(
+      env,
+      chatId,
+      'کیف پول در حال حاضر پیکربندی نشده است. برای راهنمایی با پشتیبانی تماس بگیرید.',
+    )
+    return
+  }
+  const wallet = await getUserWallet(env, chatId)
+  const format = (value: number) => new Intl.NumberFormat('fa-IR').format(value)
+  await sendMessage(
+    env,
+    chatId,
+    `💳 کیف پول نوبول\n\nموجودی: ${format(wallet.balanceToman)} تومان\nمجموع خرید کیف پول: ${format(wallet.totalSpentToman)} تومان\n\nبرای افزایش موجودی، ابتدا دکمه زیر را بزنید؛ سپس رسید انتقال را با کپشن «شارژ کیف پول مبلغ» (به تومان) ارسال کنید.`,
+    {
+      inline_keyboard: [
+        [{ text: 'درخواست شارژ با رسید', callback_data: 'wallet:topup' }],
+        [{ text: 'به‌روزرسانی موجودی', callback_data: 'wallet:balance' }],
+      ],
+    },
+  )
+}
+
+async function sendWalletTopupInstructions(
+  env: TelegramEnvironment,
+  chatId: number,
+): Promise<void> {
+  const settings = await readAdminSettings(env)
+  const cardNumber = settings.cardNumber ?? env.ADMIN_CARD_NUMBER?.trim()
+  const cardHolder = settings.cardHolder ?? env.ADMIN_CARD_HOLDER?.trim()
+  await sendMessage(
+    env,
+    chatId,
+    [
+      'برای درخواست شارژ کیف پول:',
+      '۱) مبلغ را به کارت زیر واریز کنید.',
+      `شماره کارت: ${cardNumber || 'در حال حاضر تنظیم نشده است'}`,
+      `به نام: ${cardHolder || 'در حال حاضر تنظیم نشده است'}`,
+      '۲) عکس رسید را با کپشن «شارژ کیف پول ۵۰۰۰۰۰» بفرستید و مبلغ را به تومان جایگزین کنید.',
+      'پس از بررسی مدیر، موجودی به کیف پول شما افزوده می‌شود.',
+    ].join('\n'),
+  )
 }
 
 async function providerRequest(
@@ -489,25 +556,21 @@ async function startPurchase(
   message: TelegramMessage,
   product: CatalogProduct | null,
   discountCode?: string,
+  updateId?: number,
 ): Promise<void> {
   const stored = await readAdminSettings(env)
   const cardNumber = stored.cardNumber ?? env.ADMIN_CARD_NUMBER?.trim()
   const cardHolder = stored.cardHolder ?? env.ADMIN_CARD_HOLDER?.trim()
-  if (
-    !cardNumber ||
-    !cardHolder ||
-    /X{2,}/i.test(cardNumber) ||
-    cardHolder === 'نام صاحب کارت'
-  ) {
+  if (!product || !Number.isFinite(Number(product.price_toman))) {
+    await sendMessage(env, message.chat.id, 'محصول موردنظر پیدا نشد.')
+    return
+  }
+  if (!env.VAULT_ENCRYPTION_KEY) {
     await sendMessage(
       env,
       message.chat.id,
-      'پرداخت این محصول در حال حاضر پیکربندی نشده است. لطفاً کمی بعد دوباره تلاش کنید.',
+      'ثبت سفارش موقتاً در دسترس نیست؛ تنظیم امن تحویل اطلاعات در حال تکمیل است.',
     )
-    return
-  }
-  if (!product || !Number.isFinite(Number(product.price_toman))) {
-    await sendMessage(env, message.chat.id, 'محصول موردنظر پیدا نشد.')
     return
   }
   const id = String(product.provider_product_id ?? product.id)
@@ -555,7 +618,39 @@ async function startPurchase(
     settings,
     productKey,
   )
-  const orderId = crypto.randomUUID()
+  const orderId = updateId === undefined
+    ? crypto.randomUUID()
+    : await telegramOrderId(updateId, message.chat.id, productKey)
+  const existingOrder = updateId === undefined
+    ? null
+    : (await listStoredOrders(env)).find((candidate) => candidate.orderId === orderId)
+  if (existingOrder) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      existingOrder.status === 'completed'
+        ? 'این سفارش قبلاً تکمیل شده است. اطلاعات تحویل را در بخش حساب کاربری فروشگاه ببینید.'
+        : 'درخواست این سفارش قبلاً ثبت شده و در حال پیگیری است.',
+    )
+    return
+  }
+  let walletBalanceToman = 0
+  if (env.NOBULL_WALLET_DB) {
+    try {
+      walletBalanceToman = (await getUserWallet(env, message.chat.id)).balanceToman
+    } catch (error) {
+      console.error('Wallet balance could not be checked before checkout.', {
+        chatId: message.chat.id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      await sendMessage(
+        env,
+        message.chat.id,
+        'بررسی کیف پول موقتاً ناموفق بود. لطفاً کمی بعد دوباره تلاش کنید؛ هنوز سفارشی ثبت نشده است.',
+      )
+      return
+    }
+  }
   const reference = `tg-${message.chat.id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
   const order: StoredOrder = {
     orderId,
@@ -601,6 +696,96 @@ async function startPurchase(
     { username: order.username, firstName: order.firstName },
     { totalOrders: 1 },
   )
+  if (env.NOBULL_WALLET_DB) {
+    if (walletBalanceToman >= priceToman) {
+      let debit
+      try {
+        debit = await recordWalletPurchase(
+          env,
+          message.chat.id,
+          priceToman,
+          orderId,
+        )
+      } catch (error) {
+        console.error('Wallet purchase debit outcome is uncertain.', {
+          orderId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        await saveOrder(env, {
+          ...order,
+          status: 'processing',
+          paymentMethod: 'wallet',
+          updatedAt: Date.now(),
+        })
+        await sendMessage(
+          env,
+          message.chat.id,
+          'وضعیت کسر وجه از کیف پول نامشخص است؛ سفارش برای بررسی پشتیبانی ثبت شد. لطفاً خرید را دوباره تکرار نکنید.',
+        )
+        return
+      }
+      if (debit.status === 'updated') {
+        const awaitingFulfillment: StoredOrder = {
+          ...order,
+          status: 'waiting_review',
+          paymentMethod: 'wallet',
+          updatedAt: Date.now(),
+        }
+        await saveOrder(env, awaitingFulfillment)
+        try {
+          await decideStoredOrder(env, orderId, 'approve')
+          await sendMessage(
+            env,
+            message.chat.id,
+            `✅ مبلغ ${new Intl.NumberFormat('fa-IR').format(priceToman)} تومان از کیف پول کسر شد و سفارش شما برای تحویل ثبت شد.`,
+          )
+        } catch (error) {
+          console.error('Wallet-funded order fulfillment failed.', {
+            orderId,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          })
+          const currentOrder = (await listStoredOrders(env)).find(
+            (candidate) => candidate.orderId === orderId,
+          )
+          if (currentOrder && !currentOrder.deliveredCredentials) {
+            await saveOrder(env, {
+              ...currentOrder,
+              status: 'processing',
+              paymentMethod: 'wallet',
+              updatedAt: Date.now(),
+            })
+          }
+          await sendMessage(
+            env,
+            message.chat.id,
+            'مبلغ از کیف پول کسر شد، اما ثبت سفارش نزد تأمین‌کننده کامل نشد. پشتیبانی سفارش را پیگیری می‌کند؛ لطفاً دوباره خرید نکنید.',
+          )
+        }
+        return
+      }
+      if (debit.status === 'duplicate') {
+        await sendMessage(
+          env,
+          message.chat.id,
+          'درخواست خرید شما قبلاً ثبت شده است و از کیف پول دوباره مبلغی کسر نخواهد شد.',
+        )
+        return
+      }
+    }
+  }
+  if (
+    !cardNumber ||
+    !cardHolder ||
+    /X{2,}/i.test(cardNumber) ||
+    cardHolder === 'نام صاحب کارت'
+  ) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      'پرداخت این محصول در حال حاضر پیکربندی نشده است. لطفاً کمی بعد دوباره تلاش کنید.',
+    )
+    return
+  }
   const price = new Intl.NumberFormat('fa-IR').format(priceToman)
   const invoice = [
     '🧾 فاکتور خرید نوبول',
@@ -695,6 +880,48 @@ async function forwardReceipt(
 ): Promise<void> {
   const adminChatId = env.TELEGRAM_ADMIN_CHAT_ID
   if (!adminChatId) throw new Error('Telegram admin chat is not configured.')
+  const topupCaption = message.caption?.trim().match(
+    /^شارژ\s+کیف\s+پول\s+([\d۰-۹٠-٩]{3,15})$/,
+  )
+  if (topupCaption) {
+    const amountText = topupCaption[1]
+      .replace(/[۰-۹]/g, (digit) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
+      .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    const amount = Number(amountText)
+    if (!Number.isSafeInteger(amount) || amount < 10_000 || amount > 1_000_000_000) {
+      await sendMessage(
+        env,
+        message.chat.id,
+        'مبلغ شارژ باید بین ۱۰٬۰۰۰ تا ۱٬۰۰۰٬۰۰۰٬۰۰۰ تومان باشد.',
+      )
+      return
+    }
+    const caption = [
+      'درخواست شارژ کیف پول',
+      `کاربر: ${message.from?.first_name ?? '—'}${message.from?.username ? ` (@${message.from.username})` : ''}`,
+      `شناسه کاربر: ${message.chat.id}`,
+      `مبلغ درخواستی: ${new Intl.NumberFormat('fa-IR').format(amount)} تومان`,
+    ].join('\n')
+    if (message.photo?.length) {
+      await callTelegram(env, 'sendPhoto', {
+        chat_id: adminChatId,
+        photo: message.photo[message.photo.length - 1].file_id,
+        caption,
+      })
+    } else if (message.document?.file_id) {
+      await callTelegram(env, 'sendDocument', {
+        chat_id: adminChatId,
+        document: message.document.file_id,
+        caption,
+      })
+    }
+    await sendMessage(
+      env,
+      message.chat.id,
+      'رسید شارژ برای بررسی ارسال شد. پس از تأیید مدیر، موجودی کیف پول به‌روزرسانی می‌شود.',
+    )
+    return
+  }
   const selected = [
     message.caption,
     message.reply_to_message?.text,
@@ -1162,6 +1389,16 @@ export async function onRequestPost({
       })
       if (isAdminActor) {
         await handleAdminCallback(env, request, callback)
+      } else if (
+        (data === 'wallet:topup' || data === 'wallet:balance') &&
+        callback.message?.chat.type === 'private' &&
+        callback.message.chat.id === callback.from.id
+      ) {
+        if (data === 'wallet:topup') {
+          await sendWalletTopupInstructions(env, callback.from.id)
+        } else {
+          await sendWalletStatus(env, callback.from.id)
+        }
       }
       return jsonResponse({ ok: true })
     }
@@ -1246,6 +1483,13 @@ export async function onRequestPost({
       else await showRecentOrders(env, message.chat.id)
       return jsonResponse({ ok: true })
     }
+    if (
+      privateMessage &&
+      (command === '/wallet' || text === 'کیف پول من' || text === 'کیف‌پول من')
+    ) {
+      await sendWalletStatus(env, message.chat.id)
+      return jsonResponse({ ok: true })
+    }
     if (admin && command === '/products') {
       const [provider, category, stock] = args
       await showProducts(env, request, message.chat.id, {
@@ -1275,6 +1519,7 @@ export async function onRequestPost({
           message,
           purchase?.product ?? null,
           purchase?.discountCode,
+          update.update_id,
         )
       } else {
         await sendMessage(
@@ -1289,6 +1534,7 @@ export async function onRequestPost({
                   web_app: { url: new URL('/', request.url).toString() },
                 },
               ],
+              [{ text: '💳 کیف پول من', callback_data: 'wallet:balance' }],
             ],
           },
         )

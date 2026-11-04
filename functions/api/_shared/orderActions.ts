@@ -146,6 +146,8 @@ export async function decideStoredOrder(
 
   const result = unwrapOrder(await response.json())
   if (result.delivery) {
+    const delivery = formatDelivery(result.delivery)
+    if (!delivery) throw new Error('Provider returned an empty delivery.')
     const deliveredCredentials = await encryptDelivery(
       env.VAULT_ENCRYPTION_KEY,
       result.delivery,
@@ -156,8 +158,6 @@ export async function decideStoredOrder(
       updatedAt: Date.now(),
     }
     await saveOrder(env, deliveredOrder)
-    const delivery = formatDelivery(result.delivery)
-    if (!delivery) throw new Error('Provider returned an empty delivery.')
     await sendMessage(
       env,
       order.userId,

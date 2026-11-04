@@ -50,6 +50,11 @@ interface AdminCustomer {
   totalOrders: number
   completedOrders: number
   totalSpentToman: number
+  wallet?: {
+    balanceToman: number
+    totalSpentToman: number
+    ordersCount: number
+  }
 }
 
 interface SalesSummary {
@@ -92,6 +97,7 @@ interface ProviderWallet {
 interface AdminData {
   orders: AdminOrder[]
   customers: AdminCustomer[]
+  walletConfigured?: boolean
   analytics: {
     sales: Record<'today' | 'last7Days' | 'last30Days' | 'allTime', SalesSummary>
     topProducts: Array<{
@@ -238,6 +244,7 @@ function AdminDashboard() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [pricing, setPricing] = useState<AdminData['pricing'] | null>(null)
   const [refreshingBalance, setRefreshingBalance] = useState(false)
+  const [walletDrafts, setWalletDrafts] = useState<Record<string, string>>({})
   const [productDrafts, setProductDrafts] = useState<
     Record<string, { margin: string; price: string }>
   >({})
@@ -418,6 +425,32 @@ function AdminDashboard() {
       setRefreshKey((current) => current + 1)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'به‌روزرسانی سفارش ناموفق بود.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const adjustWallet = async (customer: AdminCustomer, direction: 1 | -1) => {
+    const amount = Number(walletDrafts[customer.chatId] ?? '')
+    if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1_000_000_000) {
+      setError('مبلغ شارژ یا برداشت باید عدد صحیحی بین ۱ تا ۱٬۰۰۰٬۰۰۰٬۰۰۰ تومان باشد.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await post({
+        action: 'adjust-wallet',
+        chatId: customer.chatId,
+        amountToman: amount * direction,
+        reason: direction > 0 ? 'شارژ کیف پول توسط مدیر' : 'کاهش موجودی توسط مدیر',
+      })
+      setWalletDrafts((current) => ({ ...current, [customer.chatId]: '' }))
+      setNotice('موجودی کیف پول با موفقیت به‌روزرسانی شد.')
+      setRefreshKey((current) => current + 1)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'تعدیل کیف پول انجام نشد.')
     } finally {
       setBusy(false)
     }
@@ -791,20 +824,21 @@ function AdminDashboard() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="flex items-center gap-2 text-base font-bold"><Users size={17} className="text-emerald-200" /> CRM مشتریان ({formatNumber(customers.length)})</h2>
             <button type="button" onClick={() => downloadCsv('nobull-customers.csv', [
-              ['نام', 'نام کاربری', 'Chat ID', 'تاریخ عضویت', 'کل سفارش‌ها', 'سفارش تکمیل', 'مجموع خرید تومان', 'نشان مشتری'],
-              ...filteredCustomers.map((customer) => [customer.firstName, customer.username ? `@${customer.username}` : '', customer.chatId, formatDate(customer.firstSeenAt), customer.totalOrders, customer.completedOrders, customer.totalSpentToman, customer.completedOrders > 0 && customer.totalSpentToman >= 10_000_000 ? 'VIP' : customer.completedOrders > 0 ? 'خریدار' : 'عضو ربات']),
+              ['نام', 'نام کاربری', 'Chat ID', 'تاریخ عضویت', 'کل سفارش‌ها', 'سفارش تکمیل', 'مجموع خرید تومان', 'موجودی کیف پول', 'نشان مشتری'],
+              ...filteredCustomers.map((customer) => [customer.firstName, customer.username ? `@${customer.username}` : '', customer.chatId, formatDate(customer.firstSeenAt), customer.totalOrders, customer.completedOrders, customer.totalSpentToman, customer.wallet?.balanceToman ?? 0, customer.completedOrders > 0 && customer.totalSpentToman >= 10_000_000 ? 'VIP' : customer.completedOrders > 0 ? 'خریدار' : 'عضو ربات']),
             ])} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs text-white/65 hover:text-white"><Download size={14} /> خروجی اکسل (CSV) مشتریان</button>
           </div>
           <label className="relative block"><Search className="absolute right-3 top-3 text-white/35" size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} className={`${fieldClass()} pr-9`} placeholder="جست‌وجو نام، نام کاربری یا شناسه…" /></label>
           <div className="overflow-x-auto rounded-2xl border border-white/[0.08]">
-            <table className="w-full min-w-[900px] text-right text-xs">
-              <thead className="bg-white/[0.035] text-white/45"><tr>{['مشتری', 'Chat ID', 'عضویت', 'سفارش‌ها', 'مجموع خرید', 'نشان'].map((title) => <th key={title} className="p-3 font-medium">{title}</th>)}</tr></thead>
+            {!data?.walletConfigured && <p className="rounded-xl border border-amber-300/15 bg-amber-300/[0.05] p-3 text-xs leading-6 text-amber-100/70">کیف پول غیرفعال است؛ ابتدا binding پایگاه داده D1 با نام NOBULL_WALLET_DB را تنظیم و migration را اجرا کنید.</p>}
+            <table className="w-full min-w-[1100px] text-right text-xs">
+              <thead className="bg-white/[0.035] text-white/45"><tr>{['مشتری', 'Chat ID', 'عضویت', 'سفارش‌ها', 'مجموع خرید', 'موجودی کیف پول', 'تعدیل کیف پول (تومان)', 'نشان'].map((title) => <th key={title} className="p-3 font-medium">{title}</th>)}</tr></thead>
               <tbody className="divide-y divide-white/[0.06]">
                 {filteredCustomers.map((customer) => {
                   const badge = customer.completedOrders > 0 && customer.totalSpentToman >= 10_000_000 ? 'VIP' : customer.completedOrders > 0 ? 'خریدار' : 'عضو ربات'
-                  return <tr key={customer.chatId} className="text-white/70"><td className="p-3">{customer.firstName || '—'}<div className="mt-1 text-white/40">{customer.username ? `@${customer.username}` : 'بدون نام کاربری'}</div></td><td dir="ltr" className="p-3 text-right font-mono">{customer.chatId}</td><td className="p-3">{formatDate(customer.firstSeenAt)}</td><td className="p-3">{formatNumber(customer.totalOrders)} کل · {formatNumber(customer.completedOrders)} تکمیل</td><td className="p-3">{formatToman(customer.totalSpentToman)}</td><td className="p-3"><span className="rounded-full border border-emerald-300/15 px-2 py-1 text-emerald-100">{badge}</span></td></tr>
+                  return <tr key={customer.chatId} className="text-white/70"><td className="p-3">{customer.firstName || '—'}<div className="mt-1 text-white/40">{customer.username ? `@${customer.username}` : 'بدون نام کاربری'}</div></td><td dir="ltr" className="p-3 text-right font-mono">{customer.chatId}</td><td className="p-3">{formatDate(customer.firstSeenAt)}</td><td className="p-3">{formatNumber(customer.totalOrders)} کل · {formatNumber(customer.completedOrders)} تکمیل</td><td className="p-3">{formatToman(customer.totalSpentToman)}</td><td className="p-3">{formatToman(customer.wallet?.balanceToman ?? 0)}</td><td className="p-3"><div className="flex items-center gap-1"><input aria-label={`مبلغ تعدیل کیف پول ${customer.firstName}`} type="number" min="1" max="1000000000" step="1" disabled={busy || !data?.walletConfigured} value={walletDrafts[customer.chatId] ?? ''} onChange={(event) => setWalletDrafts((current) => ({ ...current, [customer.chatId]: event.target.value }))} className="w-28 rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-white outline-none focus:border-emerald-300/40" placeholder="مبلغ" /><button type="button" disabled={busy || !data?.walletConfigured} onClick={() => void adjustWallet(customer, 1)} className="rounded-lg bg-emerald-300/10 px-2 py-1.5 text-[10px] text-emerald-100 disabled:opacity-40">شارژ</button><button type="button" disabled={busy || !data?.walletConfigured} onClick={() => void adjustWallet(customer, -1)} className="rounded-lg bg-red-300/[0.07] px-2 py-1.5 text-[10px] text-red-100 disabled:opacity-40">کاهش</button></div></td><td className="p-3"><span className="rounded-full border border-emerald-300/15 px-2 py-1 text-emerald-100">{badge}</span></td></tr>
                 })}
-                {!filteredCustomers.length && <tr><td colSpan={6} className="p-8 text-center text-white/35">مشتری‌ای پیدا نشد.</td></tr>}
+                {!filteredCustomers.length && <tr><td colSpan={8} className="p-8 text-center text-white/35">مشتری‌ای پیدا نشد.</td></tr>}
               </tbody>
             </table>
           </div>

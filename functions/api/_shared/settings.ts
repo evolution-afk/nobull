@@ -126,6 +126,7 @@ export interface StoredOrder {
   createdAt: number
   updatedAt: number
   status: OrderStatus
+  paymentMethod?: 'receipt' | 'wallet'
   userId: string
   username: string
   firstName: string

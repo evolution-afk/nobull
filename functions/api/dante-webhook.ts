@@ -6,8 +6,10 @@ import {
 import { completeOrderByReference } from './_shared/orderActions'
 import {
   getOrderByReference,
+  saveOrder,
   type BackendEnvironment,
 } from './_shared/settings'
+import { encryptDelivery } from './_shared/vault'
 
 interface DanteWebhookEnvironment extends TelegramEnvironment, BackendEnvironment {
   DANTE_WEBHOOK_SECRET?: string
@@ -81,7 +83,12 @@ export async function onRequestPost({
   request,
   env,
 }: DanteWebhookContext): Promise<Response> {
-  if (!env.DANTE_WEBHOOK_SECRET || !env.TELEGRAM_BOT_TOKEN) {
+  if (
+    !env.DANTE_WEBHOOK_SECRET ||
+    !env.TELEGRAM_BOT_TOKEN ||
+    !env.NOBULL_SETTINGS ||
+    !env.VAULT_ENCRYPTION_KEY
+  ) {
     return jsonResponse({ error: 'Dante webhook is not configured.' }, 503)
   }
 
@@ -111,10 +118,19 @@ export async function onRequestPost({
     if (!delivery) {
       return jsonResponse({ error: 'Delivered order payload is empty.' }, 400)
     }
-    const savedOrder = env.NOBULL_SETTINGS
-      ? await getOrderByReference(env, reference)
-      : null
+    const savedOrder = await getOrderByReference(env, reference)
+    if (!savedOrder) return jsonResponse({ ok: true })
     if (savedOrder?.status === 'completed') return jsonResponse({ ok: true })
+    if (!savedOrder.deliveredCredentials) {
+      await saveOrder(env, {
+        ...savedOrder,
+        deliveredCredentials: await encryptDelivery(
+          env.VAULT_ENCRYPTION_KEY,
+          order.delivery,
+        ),
+        updatedAt: Date.now(),
+      })
+    }
     const title = order.product?.name ?? order.product?.title
     const message = `✅ سفارش شما آماده است.${title ? `\nمحصول: ${title}` : ''}\n\n${delivery}`
     await sendMessage(env, match[1], message)
@@ -125,7 +141,7 @@ export async function onRequestPost({
         `تحویل سفارش ${reference} برای کاربر ${match[1]} انجام شد:${title ? `\nمحصول: ${title}` : ''}\n\n${delivery}`,
       )
     }
-    if (savedOrder) await completeOrderByReference(env, reference)
+    await completeOrderByReference(env, reference)
     return jsonResponse({ ok: true })
   } catch (error) {
     console.error('Dante webhook processing failed.', {

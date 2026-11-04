@@ -22,7 +22,6 @@ import {
   type PromoCode,
   type StoredCustomer,
   type StoredOrder,
-  type UserWallet,
 } from './_shared/settings'
 
 interface AdminEnvironment extends OrderActionEnvironment {
@@ -675,50 +674,6 @@ export async function onRequestGet({
   }
 }
 
-if (action === 'adjust-wallet') {
-  const chatId = typeof body.chatId === 'string' ? body.chatId : ''
-  const amountToman = body.amountToman
-  const reason =
-    typeof body.reason === 'string' && body.reason.trim()
-      ? body.reason.trim()
-      : 'تعدیل موجودی توسط مدیر'
-  if (
-    !/^\d{1,20}$/.test(chatId) ||
-    typeof amountToman !== 'number' ||
-    !Number.isSafeInteger(amountToman) ||
-    amountToman === 0 ||
-    Math.abs(amountToman) > 1_000_000_000 ||
-    reason.length > 200
-  ) {
-    return jsonResponse({ error: 'شناسه کاربر یا مبلغ تعدیل کیف پول معتبر نیست.' }, 400)
-  }
-  try {
-    const result = await changeUserWallet(
-      env,
-      chatId,
-      amountToman,
-      `admin:${crypto.randomUUID()}`,
-      reason,
-    )
-    if (result.status === 'insufficient') {
-      return jsonResponse({ error: 'موجودی کیف پول برای این کاهش کافی نیست.' }, 409)
-    }
-    return jsonResponse({ ok: true, wallet: result.wallet })
-  } catch (error) {
-    console.error('Admin wallet adjustment failed.', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-    })
-    return jsonResponse(
-      {
-        error: env.NOBULL_WALLET_DB
-          ? 'تعدیل کیف پول انجام نشد.'
-          : 'پایگاه داده کیف پول پیکربندی نشده است.',
-      },
-      env.NOBULL_WALLET_DB ? 500 : 503,
-    )
-  }
-}
-
 export async function onRequestPost({
   request,
   env,
@@ -800,6 +755,50 @@ export async function onRequestPost({
 
   if (!(await authenticateAdminRequest(request, env))) {
     return jsonResponse({ error: 'نشست ورود معتبر نیست یا منقضی شده است.' }, 401)
+  }
+
+  if (action === 'adjust-wallet') {
+    const chatId = typeof body.chatId === 'string' ? body.chatId : ''
+    const amountToman = body.amountToman
+    const reason =
+      typeof body.reason === 'string' && body.reason.trim()
+        ? body.reason.trim()
+        : 'تعدیل موجودی توسط مدیر'
+    if (
+      !/^\d{1,20}$/.test(chatId) ||
+      typeof amountToman !== 'number' ||
+      !Number.isSafeInteger(amountToman) ||
+      amountToman === 0 ||
+      Math.abs(amountToman) > 1_000_000_000 ||
+      reason.length > 200
+    ) {
+      return jsonResponse({ error: 'شناسه کاربر یا مبلغ تعدیل کیف پول معتبر نیست.' }, 400)
+    }
+    try {
+      const result = await changeUserWallet(
+        env,
+        chatId,
+        amountToman,
+        `admin:${crypto.randomUUID()}`,
+        reason,
+      )
+      if (result.status === 'insufficient') {
+        return jsonResponse({ error: 'موجودی کیف پول برای این کاهش کافی نیست.' }, 409)
+      }
+      return jsonResponse({ ok: true, wallet: result.wallet })
+    } catch (error) {
+      console.error('Admin wallet adjustment failed.', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      return jsonResponse(
+        {
+          error: env.NOBULL_WALLET_DB
+            ? 'تعدیل کیف پول انجام نشد.'
+            : 'پایگاه داده کیف پول پیکربندی نشده است.',
+        },
+        env.NOBULL_WALLET_DB ? 500 : 503,
+      )
+    }
   }
 
   if (action === 'save-pricing') {
