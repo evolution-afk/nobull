@@ -10,6 +10,13 @@ export default {
         primary: '#00F2FF',
         black: '#000000',
         white: '#FFFFFF',
+        surface: {
+          DEFAULT: '#090C0D',
+          feature: '#071012',
+          card: '#0B1114',
+          rail: '#111A1E',
+          note: '#08090B',
+        },
       },
     },
   },

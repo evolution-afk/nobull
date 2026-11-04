@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -16,49 +17,31 @@ import {
 import { resolveBrandAsset, type BrandAsset } from './utils/brandAssets'
 import {
   ArrowLeft,
-  ChevronLeft,
-  ChevronRight,
   Beef,
-  Check,
   ChevronDown,
+  ChevronUp,
   CircleHelp,
   Clock3,
   Copy,
   KeyRound,
   LockKeyhole,
   MessageCircle,
+  Package,
   PackageCheck,
   Search,
   ShieldCheck,
   ShoppingBag,
-  Sparkles,
   X,
-  Zap,
 } from 'lucide-react'
 import AdminDashboard from './AdminDashboard'
-
-type StockStatus = 'available' | 'unavailable' | 'unknown'
-
-interface Product {
-  id: string
-  providerId: string
-  providerProductId: string
-  name: string
-  persianName: string
-  brand: string
-  brandKey: string
-  brandAsset: BrandAsset
-  category: string
-  persianCategory: string
-  description: string
-  persianDescription: string
-  price_toman: number
-  usdt_rate_used: number | null
-  stock: number | null
-  status: StockStatus
-  purchaseUrl: string | null
-  featured: boolean
-}
+import type { Product, ServiceGuide, StockStatus } from './types'
+import { formatNumber, formatToman, stockLabel } from './utils/format'
+import { BrandCard } from './components/BrandCard'
+import { BrandLogo } from './components/BrandLogo'
+import { FeaturedOffer } from './components/FeaturedOffer'
+import { PlanCard } from './components/PlanCard'
+import { ServiceGuideContent } from './components/ServiceGuideContent'
+import { TrustFacts } from './components/TrustFacts'
 
 interface ProductRecord {
   [key: string]: unknown
@@ -86,14 +69,7 @@ const telegramBotUsername = import.meta.env.VITE_TELEGRAM_BOT_USERNAME?.replace(
   '',
 )
 const ALL_FILTER = 'all'
-
-interface ServiceGuide {
-  title: string
-  summary: string
-  description: string
-  planDifferences: string
-  tips: string[]
-}
+const BRAND_PAGE_SIZE = 12
 
 const serviceGuides: Record<string, ServiceGuide> = {
   openai: {
@@ -738,6 +714,7 @@ function normalizeProducts(payload: unknown): Product[] {
         providerId,
         providerProductId,
         name,
+        persianName,
         brand: resolvedBrand,
         brandKey,
         brandAsset,
@@ -758,20 +735,6 @@ function normalizeProducts(payload: unknown): Product[] {
       }
     })
     .filter((product): product is Product => product !== null)
-}
-
-function formatToman(value: number): string {
-  return `${new Intl.NumberFormat('fa-IR').format(value)} تومان`
-}
-
-function stockLabel(product: Product): string {
-  if (product.status === 'available') {
-    return product.stock === null
-      ? 'موجود'
-      : `${new Intl.NumberFormat('fa-IR').format(product.stock)} عدد موجود`
-  }
-  if (product.status === 'unavailable') return 'ناموجود'
-  return 'استعلام موجودی'
 }
 
 function telegramUrl(product: Product, discountCode?: string): string | null {
@@ -795,6 +758,9 @@ function App() {
   const [selectedBrand, setSelectedBrand] = useState(ALL_FILTER)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [expandedBrand, setExpandedBrand] = useState('')
+  const [visibleBrandCount, setVisibleBrandCount] = useState(BRAND_PAGE_SIZE)
+  const brandGridRef = useRef<HTMLElement | null>(null)
+  const pendingRevealIndexRef = useRef<number | null>(null)
   const [guideBrandKey, setGuideBrandKey] = useState('')
   const [logoSrc, setLogoSrc] = useState('/logo.jpg')
   const [totpInput, setTotpInput] = useState('')
@@ -861,10 +827,11 @@ function App() {
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
+        const message = error instanceof Error ? error.message : ''
         setCatalogError(
-          error instanceof Error
-            ? error.message
-            : 'دریافت کاتالوگ با خطا روبه‌رو شد.',
+          /[\u0600-\u06FF]/.test(message)
+            ? message
+            : 'اتصال به کاتالوگ برقرار نشد؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.',
         )
       })
       .finally(() => {
@@ -887,6 +854,21 @@ function App() {
     window.addEventListener('hashchange', syncHashRoute)
     return () => window.removeEventListener('hashchange', syncHashRoute)
   }, [activeTab])
+
+  useEffect(() => {
+    const revealIndex = pendingRevealIndexRef.current
+    if (revealIndex === null) return
+    pendingRevealIndexRef.current = null
+
+    const target = brandGridRef.current?.children.item(revealIndex)
+    if (!(target instanceof HTMLElement)) return
+
+    const frame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [visibleBrandCount])
+
 
   const totpResult = useMemo(() => {
     const value = totpInput.trim()
@@ -1006,6 +988,9 @@ function App() {
       }))
       .filter((group) => group.plans.length > 0)
   }, [brandGroups, filteredProducts])
+  const pagedBrandGroups = visibleBrandGroups.slice(0, visibleBrandCount)
+  const remainingBrands = visibleBrandGroups.length - pagedBrandGroups.length
+  const hasMoreBatches = visibleBrandCount > BRAND_PAGE_SIZE
   const activeBrand = brandGroups.find(
     (group) => group.brandKey === selectedBrand,
   )
@@ -1065,14 +1050,32 @@ function App() {
 
   const scrollToProducts = () => {
     document
-      .getElementById('product-plans')
+      .getElementById('brands')
       ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const resetBrandPage = () => setVisibleBrandCount(BRAND_PAGE_SIZE)
+
+  const showMoreBrands = () => {
+    pendingRevealIndexRef.current = visibleBrandCount
+    setVisibleBrandCount((current) => current + BRAND_PAGE_SIZE)
+  }
+
+  const collapseBrands = () => {
+    pendingRevealIndexRef.current = null
+    setVisibleBrandCount(BRAND_PAGE_SIZE)
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById('brands-list')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
   }
 
   const resetFilters = () => {
     setSelectedCategory(ALL_FILTER)
     setSelectedBrand(ALL_FILTER)
     setQuery('')
+    resetBrandPage()
     scrollToProducts()
   }
 
@@ -1086,18 +1089,14 @@ function App() {
       dir="rtl"
       className="relative min-h-screen overflow-hidden bg-black text-white"
     >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-[540px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(0,242,255,0.12),transparent_65%)]"
-      />
-      <div className="relative z-10 mx-auto w-full max-w-[1240px] px-4 pb-14 pt-5 sm:px-7 lg:px-10">
-        <header className="flex flex-col gap-5 border-b border-white/[0.08] pb-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
+      <div className="relative z-10 mx-auto w-full max-w-[1240px] px-4 pb-14 pt-6 sm:px-7 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-4 pb-5">
+          <div className="flex items-center gap-3.5">
             {logoSrc ? (
               <img
                 src={logoSrc}
-                alt="NoBull"
-                className="h-12 w-12 rounded-xl border border-[#00F2FF]/30 object-cover shadow-[0_0_15px_rgba(0,242,255,0.2)] transition-all hover:scale-105"
+                alt="لوگوی نوبول"
+                className="h-[52px] w-[52px] rounded-[14px] border border-primary/25 object-cover shadow-[0_0_22px_rgba(0,242,255,0.16)]"
                 onError={() =>
                   setLogoSrc((current) =>
                     current === '/logo.jpg' ? '/logo.png' : '',
@@ -1105,245 +1104,125 @@ function App() {
                 }
               />
             ) : (
-              <span className="flex h-12 w-12 items-center justify-center rounded-xl border border-primary/30 bg-primary/[0.08] text-primary shadow-[0_0_25px_rgba(0,242,255,0.12)]">
-                <Beef size={27} strokeWidth={1.7} />
+              <span className="flex h-[52px] w-[52px] items-center justify-center rounded-[14px] border border-primary/25 bg-primary/[0.06] text-primary">
+                <Beef size={28} strokeWidth={1.7} aria-hidden="true" />
               </span>
             )}
             <div>
-              <div className="text-xl font-extrabold tracking-tight">
+              <div className="text-[19px] font-extrabold leading-[26px] tracking-tight">
                 NoBull <span className="text-primary">| نوبول</span>
               </div>
-              <p className="mt-1 max-w-[720px] text-xs leading-6 text-white/65 drop-shadow-[0_0_12px_rgba(0,242,255,0.18)] sm:text-[13px]">
+              <p className="mt-1 max-w-[560px] text-[13px] leading-[22px] text-white/60">
                 بی‌حاشیه و روراست؛ اشتراک‌های هوش مصنوعی و دیجیتال ویژه رفقا و خانواده
               </p>
             </div>
           </div>
-          <span className="flex w-fit items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.06] px-3 py-1.5 text-[11px] text-primary/90">
-            <span className="h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_#00F2FF]" />
+          <span className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl border border-primary/20 bg-primary/[0.05] px-3.5 text-[12.5px] text-primary/90">
+            <ShieldCheck size={16} aria-hidden="true" />
             خرید امن و شفاف
           </span>
         </header>
 
         <nav
           aria-label="بخش‌های نوبول"
-          className="mt-5 flex w-full gap-2 overflow-x-auto"
+          className="flex w-full gap-1 overflow-x-auto border-b border-white/10"
         >
-          <button
-            type="button"
+          <NavTab
+            active={activeTab === 'catalog'}
             onClick={() => {
               window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
               setActiveTab('catalog')
             }}
-            aria-current={activeTab === 'catalog' ? 'page' : undefined}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
-              activeTab === 'catalog'
-                ? 'border-primary/40 bg-primary/[0.1] text-primary shadow-[0_0_22px_rgba(0,242,255,0.07)]'
-                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
-            }`}
-          >
-            <ShoppingBag size={16} />
-            کاتالوگ اشتراک‌ها
-          </button>
-          <button
-            type="button"
+            icon={<ShoppingBag size={16} aria-hidden="true" />}
+            label="کاتالوگ اشتراک‌ها"
+          />
+          <NavTab
+            active={activeTab === 'account'}
             onClick={() => {
               window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
               setActiveTab('account')
               loadAccount()
             }}
-            aria-current={activeTab === 'account' ? 'page' : undefined}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
-              activeTab === 'account'
-                ? 'border-primary/40 bg-primary/[0.1] text-primary shadow-[0_0_22px_rgba(0,242,255,0.07)]'
-                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
-            }`}
-          >
-            <PackageCheck size={16} />
-            حساب کاربری و خریدهای من
-          </button>
-          <button
-            type="button"
+            icon={<PackageCheck size={16} aria-hidden="true" />}
+            label="حساب کاربری و خریدهای من"
+          />
+          <NavTab
+            active={activeTab === '2fa'}
             onClick={() => {
               window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
               setActiveTab('2fa')
             }}
-            aria-current={activeTab === '2fa' ? 'page' : undefined}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
-              activeTab === '2fa'
-                ? 'border-primary/40 bg-primary/[0.1] text-primary shadow-[0_0_22px_rgba(0,242,255,0.07)]'
-                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
-            }`}
-          >
-            <KeyRound size={16} />
-            دریافت کد دو مرحله‌ای (2FA)
-          </button>
-          <button
-            type="button"
+            icon={<KeyRound size={16} aria-hidden="true" />}
+            label="دریافت کد دو مرحله‌ای (2FA)"
+          />
+          <NavTab
+            active={activeTab === 'admin'}
+            tone="emerald"
             onClick={() => {
               window.location.hash = 'admin'
               setActiveTab('admin')
             }}
-            aria-current={activeTab === 'admin' ? 'page' : undefined}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-semibold transition sm:text-sm ${
-              activeTab === 'admin'
-                ? 'border-emerald-300/40 bg-emerald-300/[0.08] text-emerald-100'
-                : 'border-white/[0.08] bg-white/[0.025] text-white/55 hover:border-white/20 hover:text-white'
-            }`}
-          >
-            <LockKeyhole size={16} />
-            پنل مدیریت
-          </button>
+            icon={<LockKeyhole size={16} aria-hidden="true" />}
+            label="پنل مدیریت"
+          />
         </nav>
 
         {activeTab === 'catalog' ? (
           <>
-            <section className="relative mt-8 overflow-hidden rounded-[28px] border border-primary/20 bg-[#071012] px-5 py-7 shadow-[0_20px_80px_rgba(0,242,255,0.045)] sm:mt-10 sm:px-9 sm:py-10">
-              <div className="pointer-events-none absolute -left-20 -top-24 h-64 w-64 rounded-full bg-primary/[0.08] blur-[90px]" />
-              <div className="relative">
-                <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.06] px-3 py-1.5 text-[10px] font-semibold tracking-wide text-primary sm:text-xs">
-                  <Sparkles size={13} />
-                  دنیای اشتراک‌های دیجیتال، بدون حاشیه
-                </div>
-                <h1 className="max-w-3xl text-[26px] font-extrabold leading-[1.65] tracking-tight sm:text-4xl sm:leading-[1.5]">
-                  اشتراک مناسب خودت را
-                  <span className="text-primary"> پیدا کن.</span>
+            <section className="mt-6 grid items-stretch gap-6 lg:grid-cols-[0.62fr_1fr]">
+              <div className="flex flex-col justify-center gap-4 py-2 lg:pe-3">
+                <h1 className="text-[26px] font-extrabold leading-[1.55] tracking-tight text-balance sm:text-[32px] sm:leading-[52px]">
+                  اشتراک مناسب خودت را{' '}
+                  <span className="whitespace-nowrap text-primary">پیدا کن.</span>
                 </h1>
-                <p className="mt-2 max-w-2xl text-xs leading-7 text-white/50 sm:text-sm">
+                <p className="max-w-[340px] text-sm leading-7 text-white/60">
                   قیمت شفاف، موجودی به‌روز و تحویل راحت برای رفقا و خانواده.
                 </p>
-
-                <div className="mt-7 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
-                  <StatCard
-                    icon={<PackageCheck size={17} />}
-                    value="+۶۸"
-                    label="برند معتبر"
-                  />
-                  <StatCard
-                    icon={<ShoppingBag size={17} />}
-                    value="آنی"
-                    label="تحویل در تلگرام"
-                  />
-                  <StatCard
-                    icon={<Zap size={17} />}
-                    value="تومانی"
-                    label="قیمت رفاقتی"
-                  />
-                  <StatCard
-                    icon={<Check size={17} />}
-                    value="داخلی"
-                    label="ابزار کد ۲ مرحله‌ای"
-                  />
-                </div>
               </div>
+
+              <FeaturedOffer
+                product={currentFeatured}
+                index={featuredIndex % Math.max(featuredProducts.length, 1)}
+                total={featuredProducts.length}
+                loading={loading}
+                onPrevious={() =>
+                  setFeaturedIndex(
+                    (current) =>
+                      (current - 1 + Math.max(featuredProducts.length, 1)) %
+                      Math.max(featuredProducts.length, 1),
+                  )
+                }
+                onNext={() =>
+                  setFeaturedIndex(
+                    (current) =>
+                      (current + 1) % Math.max(featuredProducts.length, 1),
+                  )
+                }
+                onSelect={() => {
+                  if (currentFeatured) setSelectedProduct(currentFeatured)
+                }}
+                onBrowseAll={scrollToProducts}
+              />
             </section>
 
-            <section
-              aria-roledescription="carousel"
-              aria-label="پیشنهادهای ویژه فعال‌سازی شخصی"
-              className="relative mt-5 overflow-hidden rounded-[26px] border border-orange-300/20 bg-[linear-gradient(115deg,rgba(56,24,12,0.72),rgba(12,13,16,0.96)_55%,rgba(28,19,10,0.92))] p-5 shadow-[0_18px_60px_rgba(255,111,0,0.08)] sm:mt-6 sm:p-7"
-            >
-              <div className="pointer-events-none absolute -left-10 -top-16 h-48 w-48 rounded-full bg-orange-400/[0.08] blur-3xl" />
-              <div className="relative flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <p className="text-[10px] font-semibold tracking-[0.12em] text-orange-200/70">
-                    NO BULL • CURATED FOR YOU
-                  </p>
-                  <h2 className="mt-2 text-lg font-extrabold leading-8 text-white sm:text-xl">
-                    🔥 پیشنهادی ویژه: فعال‌سازی روی اکانت شخصی شما
-                  </h2>
-                  <p className="mt-1 text-[11px] leading-6 text-white/55">
-                    محصولات دارای کد، کلید فعال‌سازی، دعوت‌نامه یا تحویل شخصی؛ روش، مدت و ضمانت هر محصول را پیش از سفارش بررسی کنید.
-                  </p>
-                </div>
-                {currentFeatured && (
-                  <div
-                    key={currentFeatured.id}
-                    className="flex w-full items-center gap-4 rounded-2xl border border-white/[0.08] bg-black/30 p-4 sm:w-auto sm:min-w-[360px]"
-                  >
-                    <BrandLogo
-                      asset={currentFeatured.brandAsset}
-                      className="h-12 w-12 rounded-xl"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-bold text-white">
-                        {translateProductText(currentFeatured.name)}
-                      </p>
-                      <p className="mt-1 text-[10px] text-white/45">
-                        {currentFeatured.brand} · {formatToman(currentFeatured.price_toman)}
-                      </p>
-                      {currentFeatured.featured && (
-                        <span className="mt-1 inline-block text-[9px] text-amber-200">پیشنهاد منتخب نوبول</span>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedProduct(currentFeatured)}
-                      className="shrink-0 rounded-xl bg-orange-300 px-3 py-2 text-[10px] font-bold text-black transition hover:bg-orange-200"
-                    >
-                      جزئیات و خرید
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="relative mt-4 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setFeaturedIndex((current) =>
-                        (current - 1 + featuredProducts.length) %
-                        Math.max(featuredProducts.length, 1),
-                      )
-                    }
-                    disabled={featuredProducts.length < 2}
-                    aria-label="پیشنهاد قبلی"
-                    className="rounded-full border border-white/10 p-2 text-white/65 disabled:opacity-30"
-                  >
-                    <ChevronRight size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setFeaturedIndex((current) =>
-                        (current + 1) % Math.max(featuredProducts.length, 1),
-                      )
-                    }
-                    disabled={featuredProducts.length < 2}
-                    aria-label="پیشنهاد بعدی"
-                    className="rounded-full border border-white/10 p-2 text-white/65 disabled:opacity-30"
-                  >
-                    <ChevronLeft size={15} />
-                  </button>
-                  <span className="text-[10px] text-white/35">
-                    {featuredProducts.length
-                      ? `${new Intl.NumberFormat('fa-IR').format(featuredIndex + 1)} از ${new Intl.NumberFormat('fa-IR').format(featuredProducts.length)} پیشنهاد`
-                      : loading ? 'در حال بارگذاری پیشنهادها…' : 'پیشنهاد شخصی تازه به‌زودی'}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={scrollToProducts}
-                  className="text-[10px] font-semibold text-orange-100/70 hover:text-orange-100"
-                >
-                  مشاهده همه محصولات
-                </button>
-              </div>
-            </section>
+            <TrustFacts />
 
             <section
               aria-labelledby="nobull-promise"
-              className="mt-5 overflow-hidden rounded-2xl border border-primary/15 bg-gradient-to-br from-primary/[0.07] via-zinc-950/90 to-zinc-950/80 p-5 shadow-[0_12px_45px_rgba(0,242,255,0.035)] sm:mt-6 sm:p-7"
+              className="mt-6 rounded-3xl border border-white/[0.06] bg-surface-note p-5 sm:p-7"
             >
-              <p className="text-[10px] font-semibold tracking-[0.16em] text-primary/75">
-                NO BULL • OUR PROMISE
-              </p>
               <h2
                 id="nobull-promise"
-                className="mt-2 text-lg font-extrabold leading-8 text-white sm:text-xl"
+                className="flex items-center gap-2.5 text-[17px] font-extrabold leading-8 text-white sm:text-xl"
               >
-                نوبول؛ صداقت بی‌رحمانه، قیمت واقعی، بدون حاشیه.
+                <CircleHelp
+                  size={18}
+                  className="shrink-0 text-primary/75"
+                  aria-hidden="true"
+                />
+                صداقت بی‌رحمانه، قیمت واقعی، بدون حاشیه.
               </h2>
-              <div className="mt-4 space-y-4 text-xs leading-8 text-white/65 sm:text-sm sm:leading-9">
+              <div className="mt-4 space-y-4 text-sm leading-7 text-white/80">
                 <p>
                   این اکانت‌ها همه از آفرهای کشورهای مختلف و ارزان تهیه می‌شوند.
                   به دلیل محدودیت‌های جغرافیایی و رعایت نکردن مواردی مثل استفاده
@@ -1369,9 +1248,9 @@ function App() {
               </div>
             </section>
 
-            <section className="mt-7">
+            <section id="brands" className="mt-6 scroll-mt-6">
               {brandGroups.length > 0 && (
-                <div className="mb-4 flex gap-2 overflow-x-auto pb-2">
+                <div aria-label="برندها" className="flex flex-wrap gap-2">
                   {brandGroups.slice(0, 10).map(({ brand, brandKey, asset }) => (
                     <button
                       type="button"
@@ -1380,41 +1259,49 @@ function App() {
                         setSelectedBrand(brandKey)
                         setSelectedCategory(ALL_FILTER)
                         setQuery('')
+                        resetBrandPage()
                         scrollToProducts()
                       }}
-                      className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-[11px] transition ${
+                      aria-pressed={selectedBrand === brandKey}
+                      className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-3 text-[12.5px] font-semibold transition ${
                         selectedBrand === brandKey
-                          ? 'border-primary/50 bg-primary/[0.1] text-primary'
-                          : 'border-white/[0.08] bg-white/[0.035] text-white/65 hover:border-primary/35'
+                          ? 'border-primary/[0.42] bg-primary/[0.08] text-[#B9FCFF]'
+                          : 'border-white/10 bg-white/[0.025] text-white/80 hover:border-white/20 hover:text-white'
                       }`}
                     >
-                      <BrandLogo asset={asset} className="h-5 w-5" />
+                      <BrandLogo asset={asset} className="h-[22px] w-[22px] rounded-md" />
                       {brand}
                     </button>
                   ))}
                 </div>
               )}
+
               <form
                 onSubmit={handleSearchSubmit}
-                className="flex h-12 items-center gap-3 rounded-2xl border border-white/[0.1] bg-[#090c0d] px-4 transition focus-within:border-primary/45 focus-within:shadow-[0_0_24px_rgba(0,242,255,0.06)]"
+                className="mt-3 flex h-11 items-center gap-3 rounded-xl border border-white/10 bg-surface px-4 transition focus-within:border-primary/45"
               >
-                <Search size={18} className="shrink-0 text-white/35" />
+                <Search size={17} className="shrink-0 text-white/40" aria-hidden="true" />
                 <input
                   type="search"
                   value={query}
                   onChange={(event) => {
                     setQuery(event.target.value)
+                    resetBrandPage()
                   }}
                   placeholder="جست‌وجوی برند یا اشتراک..."
                   aria-label="جست‌وجوی کاتالوگ"
-                  className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-white/30"
+                  className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-white outline-none placeholder:text-white/30"
                 />
-                <ChevronDown size={16} className="text-white/25" />
+                <span className="hidden shrink-0 items-center whitespace-nowrap border-s border-white/[0.06] ps-3.5 text-xs text-white/40 sm:flex">
+                  {loading
+                    ? 'در حال دریافت'
+                    : `${formatNumber(filteredProducts.length)} پلن`}
+                </span>
               </form>
 
               <div
                 aria-label="فیلتر دسته‌بندی"
-                className="mt-3 flex gap-2 overflow-x-auto pb-2"
+                className="mt-3 flex gap-2 overflow-x-auto pb-1"
               >
                 {categoryOptions.map((item) => (
                   <button
@@ -1424,169 +1311,124 @@ function App() {
                       setSelectedCategory(item.key)
                       setSelectedBrand(ALL_FILTER)
                       setQuery('')
+                      resetBrandPage()
                       scrollToProducts()
                     }}
                     aria-pressed={selectedCategory === item.key}
-                    className={`shrink-0 rounded-full border px-4 py-2 text-[11px] font-medium transition ${
+                    className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[12.5px] font-medium transition ${
                       selectedCategory === item.key
-                        ? 'border-primary/40 bg-primary/[0.1] text-primary'
-                        : 'border-white/[0.08] bg-white/[0.025] text-white/50 hover:border-white/20 hover:text-white'
+                        ? 'border-primary/[0.38] bg-primary/[0.08] text-[#B9FCFF]'
+                        : 'border-white/10 bg-white/[0.02] text-white/60 hover:border-white/20 hover:text-white'
                     }`}
                   >
                     {item.label}
-                    <span className="mr-1 text-[9px] opacity-60">
-                      {new Intl.NumberFormat('fa-IR').format(item.count)}
+                    <span className="text-[11.5px] font-semibold opacity-70">
+                      {formatNumber(item.count)}
                     </span>
                   </button>
                 ))}
               </div>
             </section>
 
-            {visibleBrandGroups.length > 0 && (
-              <section className="mt-8">
-                <SectionHeading
-                  eyebrow="PLANS BY SERVICE"
-                  title="برندها و پلن‌های موجود"
-                  icon={<Beef size={17} />}
-                  detail={`${new Intl.NumberFormat('fa-IR').format(visibleBrandGroups.length)} برند`}
-                />
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  {visibleBrandGroups.map((group) => {
-                    const guide = getServiceGuide(
+            <div
+              id="brands-list"
+              className="mt-7 flex scroll-mt-6 items-center justify-between gap-4"
+            >
+              <h2 className="flex items-center gap-2.5 text-lg font-extrabold text-white">
+                <Package size={17} className="text-primary/80" aria-hidden="true" />
+                برندها و پلن‌های موجود
+              </h2>
+              <span className="text-[12.5px] text-white/40">
+                {formatNumber(visibleBrandGroups.length)} برند
+              </span>
+            </div>
+
+            <section
+              ref={brandGridRef}
+              aria-label="برندها و پلن‌های موجود"
+              className="brand-grid mt-3 grid items-start gap-5 sm:grid-cols-2"
+            >
+              {pagedBrandGroups.map((group) => (
+                <BrandCard
+                  key={group.brandKey}
+                  group={group}
+                  persianBrand={persianBrandNames[group.brandKey] ?? group.brand}
+                  summary={
+                    getServiceGuide(
                       group.brandKey,
                       group.brand,
                       group.category,
+                    ).summary
+                  }
+                  expanded={expandedBrand === group.brandKey}
+                  onToggle={() =>
+                    setExpandedBrand(
+                      expandedBrand === group.brandKey ? '' : group.brandKey,
                     )
-                    const persianBrand =
-                      persianBrandNames[group.brandKey] ?? group.brand
-                    const isExpanded = expandedBrand === group.brandKey
-                    return (
-                      <article
-                        key={group.brandKey}
-                        className="overflow-hidden rounded-2xl border border-white/[0.09] bg-[#0b1114] shadow-[0_15px_45px_rgba(0,0,0,0.2)] transition-colors hover:border-emerald-400/25"
-                      >
-                        <div className="p-4 sm:p-5">
-                          <div className="flex items-center justify-between">
-                            <BrandLogo
-                              asset={group.asset}
-                              className="h-12 w-12 rounded-xl"
-                            />
-                            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.07] px-3 py-1.5 text-[10px] font-semibold text-emerald-200/85">
-                              {new Intl.NumberFormat('fa-IR').format(
-                                group.plans.length,
-                              )}{' '}
-                              پلن
-                            </span>
-                          </div>
+                  }
+                  onOpenGuide={() => setGuideBrandKey(group.brandKey)}
+                  onSelectPlan={setSelectedProduct}
+                />
+              ))}
+            </section>
 
-                          <h3 className="mt-3 text-base font-extrabold text-white">
-                            <span dir="ltr">{group.brand}</span>
-                            <span className="px-1.5 text-white/35">|</span>
-                            <span>{persianBrand}</span>
-                          </h3>
-                          <p className="mt-2 line-clamp-2 text-[11px] leading-6 text-white/55">
-                            <span className="font-semibold text-white/75">
-                              {translateProductText(group.lowestPlan.name)}
-                            </span>
-                            <span className="px-1 text-white/25">—</span>
-                            {guide.summary}
-                          </p>
-
-                          <div className="mt-4 flex items-center justify-between gap-3 border-t border-white/[0.07] pt-4">
-                            <div>
-                              <p className="text-[10px] text-white/40">
-                                شروع قیمت از
-                              </p>
-                              <p className="mt-1 text-lg font-extrabold text-emerald-300">
-                                {formatToman(group.lowestPlan.price_toman)}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setGuideBrandKey(group.brandKey)}
-                              aria-label={`راهنمای کامل ${group.brand}`}
-                              title="راهنمای کامل و پلن‌ها"
-                              className="flex h-10 w-10 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-300/[0.08] text-lg font-bold text-cyan-200 transition hover:border-cyan-200/60 hover:bg-cyan-300/15"
-                            >
-                              ↗
-                            </button>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          aria-expanded={isExpanded}
-                          onClick={() =>
-                            setExpandedBrand(isExpanded ? '' : group.brandKey)
-                          }
-                          className="flex w-full items-center justify-between border-t border-emerald-400/10 bg-emerald-400/[0.045] px-4 py-3 text-right text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/[0.09] sm:px-5"
-                        >
-                          <span>
-                            {isExpanded ? '▼' : '▶'} مشاهده همه پلن‌های{' '}
-                            {persianBrand}
-                          </span>
-                          <ChevronDown
-                            size={15}
-                            className={`transition-transform duration-300 ${
-                              isExpanded ? 'rotate-180' : ''
-                            }`}
-                          />
-                        </button>
-                        <div
-                          className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${
-                            isExpanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
-                          }`}
-                        >
-                          <div className="overflow-hidden">
-                            <div className="space-y-2 border-t border-white/[0.06] bg-[#111a1e] p-3 sm:p-4">
-                              {group.plans.map((product) => (
-                                <PlanRow
-                                  key={product.id}
-                                  product={product}
-                                  onSelect={() => setSelectedProduct(product)}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      </article>
-                    )
-                  })}
+            {(remainingBrands > 0 || hasMoreBatches) && (
+              <div className="mt-6 flex flex-col items-center gap-2">
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  {remainingBrands > 0 && (
+                    <button
+                      type="button"
+                      onClick={showMoreBrands}
+                      className="group inline-flex h-12 items-center gap-2 rounded-xl border border-primary/30 bg-primary/[0.07] px-6 text-[13px] font-bold text-primary transition hover:border-primary/60 hover:bg-primary/[0.12] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    >
+                      نمایش برندهای بیشتر
+                      <span className="rounded-md bg-primary/[0.14] px-1.5 py-0.5 text-[11.5px] font-bold">
+                        +{formatNumber(remainingBrands)}
+                      </span>
+                      <ChevronDown
+                        size={16}
+                        aria-hidden="true"
+                        className="transition-transform group-hover:translate-y-0.5"
+                      />
+                    </button>
+                  )}
+                  {hasMoreBatches && (
+                    <button
+                      type="button"
+                      onClick={collapseBrands}
+                      className="group inline-flex h-12 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-5 text-[12.5px] font-semibold text-white/60 transition hover:border-white/25 hover:bg-white/[0.05] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/40"
+                    >
+                      <ChevronUp
+                        size={15}
+                        aria-hidden="true"
+                        className="transition-transform group-hover:-translate-y-0.5"
+                      />
+                      نمایش کمتر
+                    </button>
+                  )}
                 </div>
-              </section>
+                <p className="text-[11.5px] text-white/35">
+                  {formatNumber(pagedBrandGroups.length)} از{' '}
+                  {formatNumber(visibleBrandGroups.length)} برند نمایش داده شده
+                </p>
+              </div>
             )}
 
             {activeGuide && (
-              <section className="mt-7 rounded-2xl border border-primary/20 bg-[linear-gradient(135deg,rgba(0,242,255,0.07),rgba(8,11,12,0.92)_48%)] p-5 shadow-[0_0_35px_rgba(0,242,255,0.045)] sm:p-6">
-                <div className="flex items-start gap-3">
-                  <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/25 bg-primary/[0.08] text-primary">
-                    <CircleHelp size={20} />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="text-[9px] font-semibold tracking-[0.16em] text-primary/75">
-                      SERVICE GUIDE • راهنمای بی‌تعارف
-                    </p>
-                    <h2 className="mt-1 text-base font-bold text-white sm:text-lg">
-                      معرفی سرویس و نکات استفاده: {activeGuide.title}
-                    </h2>
-                  </div>
-                </div>
+              <section className="mt-6 rounded-[20px] border border-primary/15 bg-[linear-gradient(135deg,rgba(0,242,255,0.05),rgba(8,11,12,0.94)_46%)] p-5 sm:p-6">
+                <h2 className="flex items-center gap-2.5 text-[17px] font-extrabold leading-8 text-white">
+                  <CircleHelp
+                    size={17}
+                    className="shrink-0 text-primary"
+                    aria-hidden="true"
+                  />
+                  معرفی سرویس و نکات استفاده: {activeGuide.title}
+                </h2>
                 <ServiceGuideContent guide={activeGuide} />
               </section>
             )}
 
-            <section id="product-plans" className="mt-9 scroll-mt-6">
-              <SectionHeading
-                eyebrow="SELECTED PLANS"
-                title="پلن‌های اشتراک"
-                icon={<Sparkles size={17} />}
-                detail={
-                  loading
-                    ? 'در حال دریافت...'
-                    : `${new Intl.NumberFormat('fa-IR').format(filteredProducts.length)} مورد`
-                }
-              />
-
+            <section id="product-plans" className="mt-6 scroll-mt-6">
               {hasActiveFilters && (
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/15 bg-primary/[0.035] px-4 py-3">
                   <div className="flex flex-wrap items-center gap-2 text-[11px] text-white/60">
@@ -1643,11 +1485,11 @@ function App() {
                   </button>
                 </div>
               ) : loading ? (
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {Array.from({ length: 6 }, (_, index) => (
+                <div className="mt-3 grid gap-5 sm:grid-cols-2">
+                  {Array.from({ length: 4 }, (_, index) => (
                     <div
                       key={index}
-                      className="h-52 animate-pulse rounded-2xl border border-white/[0.06] bg-white/[0.025]"
+                      className="h-[252px] animate-pulse rounded-[20px] border border-white/[0.06] bg-white/[0.025]"
                     />
                   ))}
                 </div>
@@ -1823,10 +1665,10 @@ function App() {
           <AdminDashboard />
         )}
 
-        <footer className="mt-12 flex flex-col items-center justify-between gap-3 border-t border-white/[0.07] pt-5 text-[10px] text-white/30 sm:flex-row sm:text-xs">
+        <footer className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-5 text-[12.5px] text-white/40 sm:flex-row">
           <span>نوبول؛ بی‌حاشیه و روراست برای رفقا و خانواده</span>
           <span className="flex items-center gap-2">
-            <LockKeyhole size={12} />
+            <LockKeyhole size={14} className="text-primary/70" aria-hidden="true" />
             پرداخت و اطلاعات شفاف
           </span>
         </footer>
@@ -1870,263 +1712,44 @@ function App() {
   )
 }
 
-function StatCard({
+function NavTab({
+  active,
   icon,
-  value,
   label,
+  onClick,
+  tone = 'primary',
 }: {
+  active: boolean
   icon: ReactNode
-  value: string
   label: string
+  onClick: () => void
+  tone?: 'primary' | 'emerald'
 }) {
-  return (
-    <div className="rounded-2xl border border-white/[0.1] bg-white/[0.035] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl sm:p-4">
-      <div className="flex items-center gap-2 text-primary/80">
-        {icon}
-        <span className="text-base font-bold text-white sm:text-lg">{value}</span>
-      </div>
-      <p className="mt-1.5 text-[10px] text-white/40 sm:text-xs">{label}</p>
-    </div>
-  )
-}
+  const activeClasses =
+    tone === 'emerald'
+      ? 'bg-emerald-300/[0.08] text-emerald-100 after:bg-emerald-300'
+      : 'bg-primary/[0.06] text-primary after:bg-primary'
 
-function BrandLogo({
-  asset,
-  className = 'h-10 w-10',
-}: {
-  asset: BrandAsset
-  className?: string
-}) {
-  const color = `#${asset.color}`
-  let mark: ReactNode
-  switch (asset.slug) {
-    case 'openai':
-      mark = <path d="M12 3.2a4 4 0 0 1 3.9 3.1 4 4 0 0 1 3.4 5.2 4 4 0 0 1-1 6.4 4 4 0 0 1-6.2 2.2 4 4 0 0 1-6.6-2.1 4 4 0 0 1-2.7-5.8 4 4 0 0 1 2.9-6.1A4 4 0 0 1 12 3.2Zm0 3.1-3.3 1.9v3.7l3.3 1.9 3.3-1.9V8.2L12 6.3Zm-5.1 3-2.3 1.3v3.8l3.3 1.9 2.3-1.3v-1.2l-3.3-1.9V9.3Zm10.2 0v2.6l-3.3 1.9V15l2.3 1.3 3.3-1.9v-3.8l-2.3-1.3Zm-8.2 5.4v2.6l3.3 1.9 3.3-1.9v-2.6L12 17.6l-3.1-1.8Z" fill="currentColor" />
-      break
-    case 'claude':
-      mark = <g stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M12 2.5v4M12 17.5v4M2.5 12h4m11 0h4M5.3 5.3l2.8 2.8m7.8 7.8 2.8 2.8m0-13.4-2.8 2.8m-7.8 7.8-2.8 2.8" /><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" /></g>
-      break
-    case 'grok':
-      mark = <path d="M5 4 19 20M19 4 5 20" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
-      break
-    case 'cursor':
-      mark = <path d="M5 3.5 19.5 13l-6.7 1.2-3.2 5.7L5 3.5Z" fill="currentColor" stroke="white" strokeWidth="1.2" strokeLinejoin="round" />
-      break
-    case 'perplexity':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"><path d="M4 5h5v5H4zM15 5h5v5h-5zM4 14h5v5H4zM15 14h5v5h-5zM9 7.5h6M6.5 10v4m11-4v4M9 16.5h6" /><path d="m9 10 3 2 3-2m-6 4 3-2 3 2" /></g>
-      break
-    case 'midjourney':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 19 8 6l4 9 4-9 5 13M5 14h14" /><circle cx="12" cy="4" r="1.2" fill="currentColor" stroke="none" /></g>
-      break
-    case 'gemini':
-      mark = <path d="M12 2.5c1.2 4.7 2.8 7 9.5 9.5-6.7 2.5-8.3 4.8-9.5 9.5-1.2-4.7-2.8-7-9.5-9.5 6.7-2.5 8.3-4.8 9.5-9.5Z" fill="currentColor" />
-      break
-    case 'google':
-      mark = <g fill="none" strokeWidth="3.2"><path d="M20 12a8 8 0 1 1-2.4-5.7" stroke="#4285F4" /><path d="M17.6 6.3 20 8.5" stroke="#34A853" /><path d="M4.6 7.2A8 8 0 0 1 17.6 6.3" stroke="#EA4335" /><path d="M4.6 16.8A8 8 0 0 1 3.2 12" stroke="#FBBC05" /></g>
-      break
-    case 'canva':
-      mark = <text x="12" y="19" textAnchor="middle" fontSize="19" fontWeight="700" fontStyle="italic" fill="currentColor">C</text>
-      break
-    case 'spotify':
-      mark = <g><circle cx="12" cy="12" r="10" fill="currentColor" /><path d="M6.2 9.1c4.2-1.3 8.5-.8 11.6 1" fill="none" stroke="#071012" strokeWidth="1.5" strokeLinecap="round" /><path d="M7.1 12c3.4-1 7-.6 9.7.9M8 14.8c2.7-.7 5.3-.4 7.5.8" fill="none" stroke="#071012" strokeWidth="1.35" strokeLinecap="round" /></g>
-      break
-    case 'youtube':
-      mark = <g><rect x="2.5" y="5" width="19" height="14" rx="4" fill="currentColor" /><path d="m10 8.5 5.5 3.5-5.5 3.5v-7Z" fill="#fff" /></g>
-      break
-    case 'netflix':
-      mark = <path d="M5 3h4l6 12V3h4v18l-4 .2L9 9v12H5V3Z" fill="currentColor" />
-      break
-    case 'apple':
-      mark = <path d="M16.5 3.3c-.1 1.5-1 2.9-2.2 3.7-1 .7-2.3 1.1-3.5 1 .1-1.4.8-2.7 1.8-3.6 1-.9 2.5-1.4 3.9-1.1ZM19.7 16.8c-.5 1.2-.8 1.7-1.5 2.7-1 1.4-2.4 3.1-4.1 3.1-1.5 0-1.9-1-4-.9-2 .1-2.5 1-4 .9-1.7-.1-3-1.6-4-3-2.8-4-3.1-8.7-1.3-11.2 1.3-1.8 3.4-2.8 5.3-2.8 1.7 0 2.8 1 4.1 1 1.3 0 2.1-1 4.3-1 1.7 0 3.5.9 4.8 2.3-4.2 2.3-3.6 8.2.4 8.9Z" fill="currentColor" transform="translate(2 0) scale(.83)" />
-      break
-    case 'telegram':
-      mark = <path d="m3 11.4 17.7-7.1c.8-.3 1.5.2 1.2 1.5l-3 14.2c-.2 1-.8 1.3-1.6.8l-4.8-3.5-2.3 2.3c-.3.3-.5.5-1 .5l.4-4.9 9-8.1c.4-.4-.1-.6-.6-.2L7 13.8l-4.7-1.5c-1-.3-1-1 .7-1Z" fill="currentColor" />
-      break
-    case 'capcut':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M4 7h5l11 10h-5L4 7Zm0 10h5L20 7h-5L4 17Z" /></g>
-      break
-    case 'tradingview':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 19V5m0 14h18M6 15l4-4 3 2 5-7" /><path d="M15 6h3v3" /></g>
-      break
-    case 'jetbrains':
-      mark = <g><path d="m12 2 9 5v10l-9 5-9-5V7l9-5Z" fill="currentColor" /><path d="M7 8h3v3H7zm7 0h3v3h-3zm-7 6h10v2H7z" fill="#101114" /></g>
-      break
-    case 'linkedin':
-      mark = <g fill="currentColor"><rect x="3" y="8" width="4" height="13" rx="1" /><circle cx="5" cy="4.5" r="2" /><path d="M10 8h4v1.8c.7-1.3 2-2.2 3.8-2.2 3.2 0 4.2 2.1 4.2 5.4V21h-4v-5.9c0-1.4 0-3.2-2-3.2s-2.3 1.5-2.3 3.1V21h-4V8Z" /></g>
-      break
-    case 'grammarly':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="2.2"><circle cx="12" cy="12" r="9" /><path d="M17 10a5.5 5.5 0 1 0 0 4h-4" strokeLinecap="round" /></g>
-      break
-    case 'duolingo':
-      mark = <g><path d="M4 7c0-2 3-4 8-4s8 2 8 4v7c0 5-3 8-8 8s-8-3-8-8V7Z" fill="currentColor" /><path d="M8 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm8 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM8 16c2.7 2 5.3 2 8 0" fill="none" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" /></g>
-      break
-    case 'discord':
-      mark = <g><path d="M6 5c4-2 8-2 12 0l3 13c-2 2-4 3-6 3l-1-2c1-.3 2-.7 3-1.4-3.3 1.5-6.7 1.5-10 0 1 .7 2 1.1 3 1.4l-1 2c-2 0-4-1-6-3L6 5Z" fill="currentColor" /><circle cx="9" cy="12" r="1.4" fill="#fff" /><circle cx="15" cy="12" r="1.4" fill="#fff" /></g>
-      break
-    case 'nordvpn':
-    case 'expressvpn':
-      mark = <path d="M12 2 20 5v6c0 5.3-3.2 9-8 11-4.8-2-8-5.7-8-11V5l8-3Zm0 3.2L7 7v4c0 3.6 1.8 6.2 5 7.9 3.2-1.7 5-4.3 5-7.9V7l-5-1.8Z" fill="currentColor" />
-      break
-    case 'category-ai':
-      mark = <g fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="8" /><path d="M12 7v10M7 12h10M8.5 8.5l7 7m0-7-7 7" /></g>
-      break
-    case 'category-code':
-      mark = <path d="m8 6-6 6 6 6m8-12 6 6-6 6m-2-14-4 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      break
-    case 'category-design':
-      mark = <path d="m4 16 11-11 4 4L8 20H4v-4Zm9-9 4 4M4 20l5-1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      break
-    case 'category-media':
-      mark = <g><rect x="3" y="5" width="18" height="14" rx="3" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="m10 9 5 3-5 3V9Z" fill="currentColor" /></g>
-      break
-    case 'category-privacy':
-      mark = <path d="M12 2 20 5v6c0 5.3-3.2 9-8 11-4.8-2-8-5.7-8-11V5l8-3Zm-3 10 2 2 4-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      break
-    case 'category-learning':
-      mark = <path d="M3 5c4-1 7 0 9 2 2-2 5-3 9-2v14c-4-1-7 0-9 2-2-2-5-3-9-2V5Zm9 2v14" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      break
-    default:
-      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="4" width="16" height="16" rx="5" /><path d="m8 12 2.5 2.5L16 9" strokeLinecap="round" strokeLinejoin="round" /></g>
-  }
-  return (
-    <span
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-white/[0.12] p-2 ${className}`}
-      style={{
-        background:
-          asset.color === '000000'
-            ? 'linear-gradient(145deg, #ffffff, #d4d4d8)'
-            : `linear-gradient(145deg, ${color}35, ${color}10)`,
-        boxShadow: `0 0 24px ${color}35`,
-      }}
-    >
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 24 24"
-        className="h-full w-full overflow-visible"
-        style={{ color }}
-      >
-        {mark}
-      </svg>
-    </span>
-  )
-}
-
-function SectionHeading({
-  eyebrow,
-  title,
-  icon,
-  detail,
-}: {
-  eyebrow: string
-  title: string
-  icon: ReactNode
-  detail?: string
-}) {
-  return (
-    <div className="flex items-end justify-between gap-3">
-      <div>
-        <p className="text-[9px] font-semibold tracking-[0.18em] text-primary/65">
-          {eyebrow}
-        </p>
-        <h2 className="mt-1.5 flex items-center gap-2 text-base font-bold sm:text-lg">
-          <span className="text-primary">{icon}</span>
-          {title}
-        </h2>
-      </div>
-      {detail && <span className="text-[10px] text-white/35">{detail}</span>}
-    </div>
-  )
-}
-
-function PlanRow({
-  product,
-  onSelect,
-}: {
-  product: Product
-  onSelect: () => void
-}) {
-  const persianTitle = product.persianName
-  const activationDescription = getPersianDeliveryDescription(
-    product.name,
-    product.description,
-  )
   return (
     <button
       type="button"
-      onClick={onSelect}
-      className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-[#0b1114] p-3 text-right transition hover:border-emerald-300/25 hover:bg-[#142126]"
-      aria-label={`جزئیات پلن ${persianTitle}`}
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={`relative flex h-11 shrink-0 items-center gap-2 rounded-t-[10px] px-4 text-[13px] font-semibold transition after:absolute after:inset-x-3 after:-bottom-px after:h-0.5 after:rounded-full after:content-[''] ${
+        active
+          ? activeClasses
+          : 'text-white/60 after:bg-transparent hover:bg-white/[0.03] hover:text-white'
+      }`}
     >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-bold text-emerald-100 underline decoration-emerald-300/35 underline-offset-4">
-          {persianTitle}
-        </span>
-        <span className="mt-2 block text-[9px] leading-5 text-white/55">
-          <strong className="text-cyan-100/75">روش فعال‌سازی: </strong>
-          {activationDescription}
-        </span>
-        <span className="mt-1 block text-[9px] leading-5 text-white/40">
-          <strong className="text-emerald-100/60">ضمانت و قواعد استفاده: </strong>
-          {getPersianWarrantyDescription(product.name, product.description)} نوع حساب و محدودیت اشتراک را پیش از پرداخت بررسی کنید و اطلاعات ورود را با دیگران به اشتراک نگذارید.
-        </span>
-      </span>
-      <span className="flex shrink-0 flex-col items-end gap-1">
-        <span className="text-xs font-bold text-white">
-          {formatToman(product.price_toman)}
-        </span>
-        <span
-          className={`rounded-full border px-2 py-0.5 text-[9px] ${
-            product.status === 'available'
-              ? 'border-emerald-300/20 bg-emerald-300/[0.07] text-emerald-200'
-              : product.status === 'unavailable'
-                ? 'border-red-300/15 bg-red-300/[0.05] text-red-200/70'
-                : 'border-amber-300/20 bg-amber-300/[0.06] text-amber-100/75'
-          }`}
-        >
-          {stockLabel(product)}
-        </span>
-      </span>
+      {icon}
+      {label}
     </button>
   )
 }
 
-function ServiceGuideContent({ guide }: { guide: ServiceGuide }) {
-  return (
-    <div className="mt-4 space-y-3">
-      <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
-        <h3 className="text-[11px] font-bold text-cyan-100">
-          این سرویس چیست و چه کاری انجام می‌دهد؟
-        </h3>
-        <p className="mt-1.5 text-[10px] leading-6 text-white/60">
-          {guide.description}
-        </p>
-      </div>
-      <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
-        <h3 className="text-[11px] font-bold text-cyan-100">
-          تفاوت پلن‌ها و اصطلاحات
-        </h3>
-        <p className="mt-1.5 text-[10px] leading-6 text-white/60">
-          {guide.planDifferences}
-        </p>
-      </div>
-      <div>
-        <h3 className="mb-2 text-[11px] font-bold text-emerald-200">
-          نکات حیاتی استفاده؛ بی‌تعارف
-        </h3>
-        <ul className="grid gap-2 sm:grid-cols-3">
-          {guide.tips.map((tip) => (
-            <li
-              key={tip}
-              className="rounded-xl border border-white/[0.07] bg-black/25 px-3 py-2.5 text-[10px] leading-6 text-white/55"
-            >
-              {tip}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  )
-}
+
+
+
 
 function BrandGuideModal({
   brand,
@@ -2181,12 +1804,12 @@ function BrandGuideModal({
         </div>
         <ServiceGuideContent guide={guide} />
         <div className="mt-5">
-          <h3 className="mb-2 text-xs font-bold text-white">
-            پلن‌های این سرویس ({new Intl.NumberFormat('fa-IR').format(plans.length)})
+          <h3 className="mb-2 text-[13px] font-bold text-white">
+            پلن‌های این سرویس ({formatNumber(plans.length)})
           </h3>
           <div className="space-y-2">
             {plans.map((product) => (
-              <PlanRow
+              <PlanCard
                 key={product.id}
                 product={product}
                 onSelect={() => onSelectPlan(product)}
