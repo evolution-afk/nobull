@@ -9,7 +9,9 @@ import {
   type TelegramEnvironment as BaseTelegramEnvironment,
 } from './_shared/telegram'
 import {
+  applyDiscountToPrice,
   DEFAULT_PROFIT_MARGIN_TIERS,
+  findActiveDiscountCode,
   getEffectiveSettings,
   calculateProductPriceToman,
   getProviderKey,
@@ -28,6 +30,12 @@ import {
   type StoredOrder,
 } from './_shared/settings'
 import { decideStoredOrder } from './_shared/orderActions'
+import {
+  getPersianDeliveryDescription,
+  getPersianLoginInstructions,
+  getPersianWarrantyDescription,
+  translateProductText,
+} from '../../src/utils/persianTranslator'
 
 interface TelegramEnvironment extends BaseTelegramEnvironment, BackendEnvironment {
   TELEGRAM_WEBHOOK_SECRET?: string
@@ -48,7 +56,7 @@ interface TelegramMessage {
   message_id: number
   text?: string
   caption?: string
-  chat: { id: number }
+  chat: { id: number; type?: string }
   from?: { id: number; first_name?: string; username?: string }
   photo?: Array<{ file_id: string }>
   document?: { file_id: string; mime_type?: string }
@@ -62,7 +70,7 @@ interface TelegramUpdate {
     id: string
     from: { id: number }
     data?: string
-    message?: { message_id: number; chat: { id: number } }
+    message?: { message_id: number; chat: { id: number; type?: string } }
   }
 }
 
@@ -74,6 +82,9 @@ interface CatalogProduct {
   name?: string
   title?: string
   product_name?: string
+  persian_name?: string
+  persian_description?: string
+  description?: string
   brand?: string
   brand_name?: string
   category?: string
@@ -85,6 +96,7 @@ interface CatalogProduct {
   quantity?: number | string | null
   in_stock?: boolean
   inStock?: boolean
+  hidden?: boolean
 }
 
 interface ProviderOrder {
@@ -154,6 +166,14 @@ function unwrapList(value: unknown): unknown[] {
 
 function isAdmin(env: TelegramEnvironment, userId: number | undefined): boolean {
   return Boolean(userId && String(userId) === env.TELEGRAM_ADMIN_CHAT_ID)
+}
+
+function isPrivateMessage(message: TelegramMessage): boolean {
+  return (
+    message.chat.type === 'private' &&
+    message.from !== undefined &&
+    message.chat.id === message.from.id
+  )
 }
 
 function adminDashboard(): {
@@ -391,14 +411,15 @@ async function showProducts(
   })
   const lines = filtered.slice(0, 15).map((product, index) => {
     const id = product.provider_product_id ?? product.id ?? '—'
-    const title =
-      product.name ?? product.title ?? product.product_name ?? 'محصول'
+    const title = product.persian_name ?? translateProductText(
+      product.name ?? product.title ?? product.product_name ?? 'محصول',
+    )
     const stock = productStock(product)
     const stockText = stock === null ? 'نامشخص' : stock ? 'موجود' : 'ناموجود'
     const price = Number.isFinite(Number(product.price_toman))
       ? `${new Intl.NumberFormat('fa-IR').format(Number(product.price_toman))} تومان`
       : 'قیمت نامشخص'
-    return `${index + 1}. ${title}\n   ${product.provider_name ?? product.provider_id} | ${String(id)} | ${stockText} | ${price}`
+    return `${index + 1}. ${title}\n   ${translateProductText(product.provider_name ?? product.provider_id ?? '')} | ${String(id)} | ${stockText} | ${price}`
   })
   const providers = await listProviders(env)
   const keyboard = {
@@ -433,34 +454,43 @@ async function showProducts(
   )
 }
 
-async function findProduct(
+async function findPurchaseProduct(
   request: Request,
-  productId: string,
-  providerId?: string,
-): Promise<CatalogProduct | null> {
+  payload: string,
+): Promise<{ product: CatalogProduct; discountCode?: string } | null> {
   const products = await getCatalog(request)
-  return (
-    products.find((product) => {
-      const id = String(product.provider_product_id ?? product.id ?? '')
-      return (
-        id === productId &&
-        (!providerId || product.provider_id === providerId)
-      )
-    }) ?? null
-  )
+  for (const product of products) {
+    if (product.hidden === true) continue
+    const providerId = product.provider_id ?? 'dante'
+    const productId = String(
+      product.provider_product_id ?? product.id ?? '',
+    )
+    if (!productId) continue
+    const prefixes = [
+      `buy_${providerId}_${productId}`,
+      `buy_${providerId}__${productId}`,
+      ...(providerId === 'dante' ? [`buy_${productId}`] : []),
+    ]
+    for (const prefix of prefixes) {
+      if (payload === prefix) return { product }
+      if (!payload.startsWith(`${prefix}_`)) continue
+      const discountCode = payload.slice(prefix.length + 1)
+      if (/^[A-Za-z0-9_-]{2,20}$/.test(discountCode)) {
+        return { product, discountCode }
+      }
+    }
+  }
+  return null
 }
 
 async function startPurchase(
   request: Request,
   env: TelegramEnvironment,
   message: TelegramMessage,
-  productId: string,
-  providerId?: string,
+  product: CatalogProduct | null,
+  discountCode?: string,
 ): Promise<void> {
-  const [stored, product] = await Promise.all([
-    readAdminSettings(env),
-    findProduct(request, productId, providerId),
-  ])
+  const stored = await readAdminSettings(env)
   const cardNumber = stored.cardNumber ?? env.ADMIN_CARD_NUMBER?.trim()
   const cardHolder = stored.cardHolder ?? env.ADMIN_CARD_HOLDER?.trim()
   if (
@@ -481,8 +511,10 @@ async function startPurchase(
     return
   }
   const id = String(product.provider_product_id ?? product.id)
-  const title =
+  const rawTitle =
     product.name ?? product.title ?? product.product_name ?? `محصول ${id}`
+  const title = product.persian_name ?? translateProductText(rawTitle)
+  const description = product.description ?? ''
   const usdPrice = Number(product.price_usd)
   const rate = Number(product.usdt_rate_used)
   if (!Number.isFinite(usdPrice) || usdPrice < 0 || !Number.isFinite(rate) || rate <= 0) {
@@ -494,8 +526,35 @@ async function startPurchase(
     return
   }
   const settings = await getEffectiveSettings(env)
-  const priceToman = calculateProductPriceToman(usdPrice, rate, settings)
-  const appliedMarginPercent = getProfitMarginPercent(usdPrice, settings)
+  const productKey = String(
+    product.id ?? `${product.provider_id ?? 'dante'}--${id}`,
+  )
+  const originalPriceToman = calculateProductPriceToman(
+    usdPrice,
+    rate,
+    settings,
+    productKey,
+  )
+  const discount = discountCode
+    ? findActiveDiscountCode(stored.discountCodes, discountCode)
+    : null
+  if (discountCode && !discount) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      'کد تخفیف معتبر نیست یا ظرفیت استفاده از آن به پایان رسیده است. لطفاً از فروشگاه کد دیگری وارد کنید.',
+    )
+    return
+  }
+  const priceToman = discount
+    ? applyDiscountToPrice(originalPriceToman, discount)
+    : originalPriceToman
+  const discountToman = originalPriceToman - priceToman
+  const appliedMarginPercent = getProfitMarginPercent(
+    usdPrice,
+    settings,
+    productKey,
+  )
   const orderId = crypto.randomUUID()
   const reference = `tg-${message.chat.id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
   const order: StoredOrder = {
@@ -508,16 +567,34 @@ async function startPurchase(
     firstName: message.from?.first_name ?? '',
     productId: id,
     productTitle: title,
-    brand: product.brand ?? product.brand_name ?? product.category_name ?? product.category ?? 'سایر',
+    productDescription: description,
+    productWarrantySource: `${rawTitle} ${description}`,
+    brand: translateProductText(
+      product.brand ?? product.brand_name ?? product.category_name ?? product.category ?? 'سایر',
+    ),
     provider: product.provider_id ?? 'dante',
     priceUsd: usdPrice,
     usdtRate: rate,
     appliedMarginPercent,
     priceToman,
-    estimatedProfitToman: priceToman - Math.round(usdPrice * rate),
+    estimatedProfitToman:
+      priceToman - Math.round(usdPrice * rate) - settings.fixedFeeToman,
     reference,
+    ...(discount
+      ? { discountCode: discount.code, discountToman }
+      : {}),
   }
   await saveOrder(env, order)
+  if (discount) {
+    await writeAdminSettings(env, {
+      ...stored,
+      discountCodes: (stored.discountCodes ?? []).map((item) =>
+        item.code.toUpperCase() === discount.code.toUpperCase()
+          ? { ...item, usedCount: item.usedCount + 1 }
+          : item,
+      ),
+    })
+  }
   await upsertCustomer(
     env,
     message.chat.id,
@@ -529,8 +606,20 @@ async function startPurchase(
     '🧾 فاکتور خرید نوبول',
     '',
     `محصول: ${title}`,
-    `تأمین‌کننده: ${product.provider_name ?? product.provider_id ?? '—'}`,
+    `تأمین‌کننده: ${translateProductText(product.provider_name ?? product.provider_id ?? '—')}`,
     `شناسه محصول: ${id}`,
+    ...(product.persian_description
+      ? [`توضیحات: ${product.persian_description}`]
+      : []),
+    `روش تحویل: ${getPersianDeliveryDescription(rawTitle, description)}`,
+    getPersianWarrantyDescription(rawTitle, description),
+    getPersianLoginInstructions(rawTitle, description),
+    ...(discount
+      ? [
+          `قیمت پیش از تخفیف: ${new Intl.NumberFormat('fa-IR').format(originalPriceToman)} تومان`,
+          `کد تخفیف ${discount.code}: ${new Intl.NumberFormat('fa-IR').format(discountToman)} تومان`,
+        ]
+      : []),
     `مبلغ قابل پرداخت: ${price} تومان`,
     '',
     `شماره کارت: ${cardNumber}`,
@@ -870,7 +959,7 @@ async function handleReceiptCallback(
     await sendMessage(
       env,
       context.userChatId,
-      `✅ سفارش شما آماده است.\n\n${delivery}`,
+      `✅ سفارش شما آماده است.\n\n${delivery}\n\n${getPersianWarrantyDescription()}\n\n${getPersianLoginInstructions(delivery)}`,
     )
     await sendMessage(
       env,
@@ -1046,7 +1135,9 @@ export async function onRequestPost({
     if (update.callback_query) {
       const callback = update.callback_query
       const data = callback.data ?? ''
-      const isAdminActor = isAdmin(env, callback.from.id)
+      const isAdminActor =
+        isAdmin(env, callback.from.id) &&
+        callback.message?.chat.id === callback.from.id
       const isAdminAction = data.startsWith('panel:') ||
         data.startsWith('products:') ||
         data.startsWith('approve:') ||
@@ -1080,7 +1171,8 @@ export async function onRequestPost({
     const text = message.text?.trim() ?? ''
     const [rawCommand = '', ...args] = text.split(/\s+/)
     const command = rawCommand.split('@')[0].toLowerCase()
-    const admin = isAdmin(env, message.from?.id)
+    const privateMessage = isPrivateMessage(message)
+    const admin = isAdmin(env, message.from?.id) && privateMessage
     try {
       await upsertCustomer(
         env,
@@ -1096,7 +1188,7 @@ export async function onRequestPost({
         error: error instanceof Error ? error.message : 'Unknown error',
       })
     }
-    if (command === '/start') {
+    if (command === '/start' && privateMessage) {
       try {
         await registerTelegramUser(env, message.chat.id)
       } catch (error) {
@@ -1166,16 +1258,24 @@ export async function onRequestPost({
       return jsonResponse({ ok: true })
     }
     if (command === '/start') {
-      const legacyProviderMatch = text.match(
-        /^\/start(?:@\w+)?\s+buy_([a-z0-9-]{1,16})__([a-zA-Z0-9_-]{1,38})$/i,
-      )
-      const match = legacyProviderMatch ?? text.match(
-        /^\/start(?:@\w+)?\s+buy_([a-z0-9-]{1,16})_([a-zA-Z0-9_-]{1,38})$/i,
-      )
-      const legacy = text.match(/^\/start(?:@\w+)?\s+buy_([a-zA-Z0-9_-]+)$/i)
-      const productId = match?.[2] ?? legacy?.[1]
-      if (productId) {
-        await startPurchase(request, env, message, productId, match?.[1])
+      const payload = text.match(/^\/start(?:@\w+)?\s+(buy_[A-Za-z0-9_-]+)$/i)?.[1]
+      if (payload) {
+        if (!privateMessage) {
+          await sendMessage(
+            env,
+            message.chat.id,
+            'برای حفظ حریم خصوصی، ثبت سفارش فقط در گفت‌وگوی خصوصی با ربات انجام می‌شود.',
+          )
+          return jsonResponse({ ok: true })
+        }
+        const purchase = await findPurchaseProduct(request, payload)
+        await startPurchase(
+          request,
+          env,
+          message,
+          purchase?.product ?? null,
+          purchase?.discountCode,
+        )
       } else {
         await sendMessage(
           env,
@@ -1196,6 +1296,14 @@ export async function onRequestPost({
       return jsonResponse({ ok: true })
     }
     if (message.photo?.length || message.document?.file_id) {
+      if (!privateMessage) {
+        await sendMessage(
+          env,
+          message.chat.id,
+          'برای حفظ حریم خصوصی، ارسال رسید فقط در گفت‌وگوی خصوصی با ربات انجام می‌شود.',
+        )
+        return jsonResponse({ ok: true })
+      }
       await forwardReceipt(env, message)
     }
     return jsonResponse({ ok: true })

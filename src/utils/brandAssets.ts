@@ -3,7 +3,6 @@ export interface BrandAsset {
   slug: string
   color: string
   categoryLabel: string
-  logoUrl: string
 }
 
 interface BrandDefinition {
@@ -16,11 +15,11 @@ interface BrandDefinition {
 
 const definitions: BrandDefinition[] = [
   { name: 'ChatGPT', slug: 'openai', color: '10A37F', categoryLabel: 'هوش مصنوعی', aliases: ['chat gpt', 'chatgpt'] },
-  { name: 'OpenAI', slug: 'openai', color: 'FFFFFF', categoryLabel: 'هوش مصنوعی' },
+  { name: 'OpenAI', slug: 'openai', color: '10A37F', categoryLabel: 'هوش مصنوعی', aliases: ['open ai'] },
   { name: 'Claude', slug: 'claude', color: 'D97757', categoryLabel: 'هوش مصنوعی', aliases: ['anthropic'] },
-  { name: 'Gemini', slug: 'googlegemini', color: '6B5CE7', categoryLabel: 'هوش مصنوعی', aliases: ['google gemini'] },
+  { name: 'Gemini', slug: 'gemini', color: '8E75FF', categoryLabel: 'هوش مصنوعی', aliases: ['google gemini'] },
   { name: 'Google', slug: 'google', color: '4285F4', categoryLabel: 'ابزار دیجیتال' },
-  { name: 'Grok', slug: 'x', color: 'FFFFFF', categoryLabel: 'هوش مصنوعی', aliases: ['xai'] },
+  { name: 'Grok', slug: 'grok', color: 'FFFFFF', categoryLabel: 'هوش مصنوعی', aliases: ['xai', 'x ai'] },
   { name: 'Cursor', slug: 'cursor', color: '00D8E8', categoryLabel: 'برنامه‌نویسی' },
   { name: 'Notion', slug: 'notion', color: '000000', categoryLabel: 'ابزار دیجیتال' },
   { name: 'Perplexity', slug: 'perplexity', color: '20B8CD', categoryLabel: 'هوش مصنوعی' },
@@ -89,10 +88,9 @@ const brands = definitions
 
 const fallbackBrand: BrandAsset = {
   name: 'سایر',
-  slug: 'circle-help',
+  slug: 'category-tools',
   color: '00F2FF',
   categoryLabel: 'اشتراک دیجیتال',
-  logoUrl: '',
 }
 
 function matchesAlias(text: string, alias: string): boolean {
@@ -106,13 +104,33 @@ export function resolveBrandAsset(...values: string[]): BrandAsset {
     brand.aliases.some((alias) => matchesAlias(searchableText, alias)),
   )
 
-  if (!match) return fallbackBrand
+  if (!match) {
+    const categoryText = searchableText.toLocaleLowerCase()
+    if (/ai|هوش مصنوعی|artificial intelligence/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-ai', categoryLabel: 'هوش مصنوعی' }
+    }
+    if (/vpn|security|privacy|امنیت|حریم خصوصی/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-privacy', categoryLabel: 'حریم خصوصی' }
+    }
+    if (/music|video|stream|موسیقی|ویدیو|سرگرمی/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-media', categoryLabel: 'سرگرمی' }
+    }
+    if (/design|graphic|creative|طراحی|گرافیک/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-design', categoryLabel: 'طراحی و تدوین' }
+    }
+    if (/code|developer|programming|برنامه.?نویسی/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-code', categoryLabel: 'برنامه‌نویسی' }
+    }
+    if (/education|learning|course|آموزش/.test(categoryText)) {
+      return { ...fallbackBrand, slug: 'category-learning', categoryLabel: 'آموزش' }
+    }
+    return fallbackBrand
+  }
   return {
     name: match.name,
     slug: match.slug,
     color: match.color,
     categoryLabel: match.categoryLabel,
-    logoUrl: `https://cdn.simpleicons.org/${match.slug}/${match.color}`,
   }
 }
 
@@ -122,6 +140,5 @@ export function getKnownBrandAssets(): BrandAsset[] {
     slug,
     color,
     categoryLabel,
-    logoUrl: `https://cdn.simpleicons.org/${slug}/${color}`,
   }))
 }

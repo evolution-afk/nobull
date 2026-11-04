@@ -1,3 +1,5 @@
+import { translateProductText } from '../../../src/utils/persianTranslator'
+
 export interface TelegramEnvironment {
   TELEGRAM_BOT_TOKEN?: string
 }
@@ -56,37 +58,70 @@ export async function sendMessage(
   return callTelegram(env, 'sendMessage', body)
 }
 
+const deliveryLabels: Record<string, string> = {
+  username: 'نام کاربری',
+  user: 'نام کاربری',
+  email: 'ایمیل',
+  password: 'رمز عبور',
+  pass: 'رمز عبور',
+  login: 'ورود',
+  account: 'اکانت',
+  url: 'لینک ورود',
+  link: 'لینک ورود',
+  two_fa: 'کد دومرحله‌ای',
+  '2fa': 'کد دومرحله‌ای',
+  recovery_code: 'کد بازیابی',
+  instructions: 'راهنما',
+  two_fa_secret: 'کلید ورود دومرحله‌ای',
+  totp: 'کد یک‌بارمصرف',
+  authenticator: 'برنامه تولید کد تأیید',
+  warranty: 'گارانتی',
+  warranty_exclusions: 'موارد خارج از پوشش گارانتی',
+  format: 'قالب اطلاعات',
+}
+
 export function formatDelivery(value: unknown): string {
-  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'string') {
+    return value
+      .split(/\r?\n/)
+      .map((line) => {
+        const match = line.match(/^\s*([\w -]{2,40})\s*:\s*(.*)$/)
+        if (!match) {
+          return (
+            /(?:https?:\/\/|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/i.test(line) ||
+            /^[A-Za-z0-9._~+/=-]{4,}$/.test(line.trim())
+          )
+            ? line
+            : translateProductText(line)
+        }
+        const key = match[1].trim()
+        const label =
+          deliveryLabels[key.toLowerCase().replace(/[\s-]+/g, '_')] ??
+          translateProductText(key)
+        const rawValue = match[2]
+        const sensitive = /^(?:user(?:name)?|email|password|pass|two_fa|2fa|two_fa_secret|recovery_code|code|token|secret|url|link)$/i.test(
+          key.replace(/[\s-]+/g, '_'),
+        )
+        return `${label}: ${sensitive ? rawValue : translateProductText(rawValue)}`
+      })
+      .join('\n')
+      .trim()
+  }
   if (!value || typeof value !== 'object') return String(value ?? '')
 
-  const labels: Record<string, string> = {
-    username: 'نام کاربری',
-    user: 'نام کاربری',
-    email: 'ایمیل',
-    password: 'رمز عبور',
-    pass: 'رمز عبور',
-    login: 'ورود',
-    account: 'اکانت',
-    url: 'لینک ورود',
-    link: 'لینک ورود',
-    two_fa: 'کد دومرحله‌ای',
-    '2fa': 'کد دومرحله‌ای',
-    recovery_code: 'کد بازیابی',
-    instructions: 'راهنما',
-  }
   const lines: string[] = []
 
   const visit = (item: unknown, key?: string) => {
     if (item === null || item === undefined || item === '') return
     if (typeof item !== 'object') {
       const label = key
-        ? labels[key.toLowerCase()] ??
-          key.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) =>
-            letter.toUpperCase(),
-          )
+        ? deliveryLabels[key.toLowerCase()] ??
+          translateProductText(key.replace(/[_-]+/g, ' '))
         : 'اطلاعات'
-      lines.push(`${label}: ${String(item)}`)
+      const stringValue = String(item)
+      lines.push(
+        `${label}: ${key && /(?:user|email|pass|token|secret|recovery|2fa|auth|url|link|code)/i.test(key) ? stringValue : translateProductText(stringValue)}`,
+      )
       return
     }
     if (Array.isArray(item)) {

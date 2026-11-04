@@ -16,6 +16,40 @@ export interface SettingsKV {
   }>
 }
 
+export interface WalletDatabaseStatement {
+  bind(...values: Array<string | number>): WalletDatabaseStatement
+  first<T>(): Promise<T | null>
+  all<T>(): Promise<{ results: T[] }>
+  run(): Promise<{
+    success: boolean
+    meta: { changes?: number }
+  }>
+}
+
+export interface WalletDatabase {
+  prepare(query: string): WalletDatabaseStatement
+  batch(
+    statements: WalletDatabaseStatement[],
+  ): Promise<Array<{ success: boolean; meta: { changes?: number } }>>
+}
+
+export interface UserWallet {
+  chatId: string
+  balanceToman: number
+  totalSpentToman: number
+  ordersCount: number
+}
+
+export type WalletChangeResult =
+  | { status: 'updated'; wallet: UserWallet }
+  | { status: 'insufficient'; wallet: UserWallet }
+  | { status: 'duplicate'; wallet: UserWallet }
+
+export interface EncryptedDelivery {
+  iv: string
+  ciphertext: string
+}
+
 export interface ProviderConfig {
   id: string
   name: string
@@ -38,7 +72,27 @@ export interface AdminSettings {
   cardNumber?: string
   cardHolder?: string
   activeProviderId?: string
+  productOverrides?: Record<string, ProductOverride>
+  discountCodes?: PromoCode[]
   updatedAt?: number
+}
+
+export interface ProductOverride {
+  customMarginPercent?: number
+  customPriceToman?: number
+  featured?: boolean
+  hidden?: boolean
+}
+
+export interface PromoCode {
+  code: string
+  type: 'percent' | 'fixed_toman'
+  value: number
+  maxUses: number
+  usedCount: number
+  active: boolean
+  expiresAt?: string
+  description?: string
 }
 
 export interface BackendEnvironment {
@@ -56,6 +110,8 @@ export interface BackendEnvironment {
   TELEGRAM_WEBHOOK_SECRET?: string
   TELEGRAM_ADMIN_CHAT_ID?: string
   TELEGRAM_BOT_TOKEN?: string
+  NOBULL_WALLET_DB?: WalletDatabase
+  VAULT_ENCRYPTION_KEY?: string
 }
 
 export type OrderStatus =
@@ -75,6 +131,9 @@ export interface StoredOrder {
   firstName: string
   productId: string
   productTitle: string
+  productDescription?: string
+  productWarrantySource?: string
+  deliveredCredentials?: EncryptedDelivery
   brand: string
   provider: string
   priceUsd: number
@@ -82,6 +141,8 @@ export interface StoredOrder {
   appliedMarginPercent: number
   priceToman: number
   estimatedProfitToman: number
+  discountCode?: string
+  discountToman?: number
   reference: string
   completedAt?: number
 }
@@ -108,6 +169,210 @@ export const DEFAULT_PROFIT_MARGIN_TIERS = [
   { minUsd: 8, maxUsd: 12, percent: 60 },
   { minUsd: 12, maxUsd: null, percent: 50 },
 ] as const
+
+function walletFromRow(
+  chatId: string,
+  row: {
+    balance_toman: number
+    total_spent_toman: number
+    orders_count: number
+  } | null,
+): UserWallet {
+  return {
+    chatId,
+    balanceToman: Number(row?.balance_toman ?? 0),
+    totalSpentToman: Number(row?.total_spent_toman ?? 0),
+    ordersCount: Number(row?.orders_count ?? 0),
+  }
+}
+
+export async function getUserWallet(
+  env: BackendEnvironment,
+  chatId: string | number,
+): Promise<UserWallet> {
+  if (!env.NOBULL_WALLET_DB) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  const id = String(chatId)
+  const row = await env.NOBULL_WALLET_DB.prepare(
+    `SELECT balance_toman, total_spent_toman, orders_count
+     FROM nobull_wallet_accounts WHERE chat_id = ?`,
+  )
+    .bind(id)
+    .first<{
+      balance_toman: number
+      total_spent_toman: number
+      orders_count: number
+    }>()
+  return walletFromRow(id, row)
+}
+
+export async function getUserWallets(
+  env: BackendEnvironment,
+  chatIds: string[],
+): Promise<Map<string, UserWallet>> {
+  if (!env.NOBULL_WALLET_DB) {
+    return new Map(
+      chatIds.map((chatId) => [
+        chatId,
+        walletFromRow(chatId, null),
+      ]),
+    )
+  }
+  const wallets = new Map<string, UserWallet>()
+  for (let index = 0; index < chatIds.length; index += 90) {
+    const batch = chatIds.slice(index, index + 90)
+    if (!batch.length) continue
+    const placeholders = batch.map(() => '?').join(', ')
+    const result = await env.NOBULL_WALLET_DB.prepare(
+      `SELECT chat_id, balance_toman, total_spent_toman, orders_count
+       FROM nobull_wallet_accounts WHERE chat_id IN (${placeholders})`,
+    )
+      .bind(...batch)
+      .all<{
+        chat_id: string
+        balance_toman: number
+        total_spent_toman: number
+        orders_count: number
+      }>()
+    for (const row of result.results) {
+      wallets.set(row.chat_id, walletFromRow(row.chat_id, row))
+    }
+  }
+  for (const chatId of chatIds) {
+    if (!wallets.has(chatId)) wallets.set(chatId, walletFromRow(chatId, null))
+  }
+  return wallets
+}
+
+export async function changeUserWallet(
+  env: BackendEnvironment,
+  chatId: string | number,
+  amountToman: number,
+  reference: string,
+  reason: string,
+): Promise<WalletChangeResult> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  if (
+    !/^\d+$/.test(String(chatId)) ||
+    !Number.isSafeInteger(amountToman) ||
+    amountToman === 0 ||
+    Math.abs(amountToman) > 1_000_000_000 ||
+    !/^[A-Za-z0-9:_-]{1,120}$/.test(reference) ||
+    reason.length > 200
+  ) {
+    throw new Error('Wallet transaction details are invalid.')
+  }
+  const id = String(chatId)
+  const now = Date.now()
+  const accountUpdate =
+    amountToman > 0
+      ? database
+          .prepare(
+            `INSERT INTO nobull_wallet_accounts
+             (chat_id, balance_toman, total_spent_toman, orders_count, updated_at)
+             VALUES (?, ?, 0, 0, ?)
+             ON CONFLICT(chat_id) DO UPDATE SET
+               balance_toman = balance_toman + excluded.balance_toman,
+               updated_at = excluded.updated_at`,
+          )
+          .bind(id, amountToman, now)
+      : database
+          .prepare(
+            `UPDATE nobull_wallet_accounts
+             SET balance_toman = balance_toman + ?, updated_at = ?
+             WHERE chat_id = ? AND balance_toman + ? >= 0`,
+          )
+          .bind(amountToman, now, id, amountToman)
+  try {
+    const results = await database.batch([
+      accountUpdate,
+      database
+        .prepare(
+          `INSERT INTO nobull_wallet_transactions
+           (chat_id, delta_toman, reference, reason, created_at)
+           SELECT ?, ?, ?, ?, ? WHERE changes() = 1`,
+        )
+        .bind(id, amountToman, reference, reason, now),
+    ])
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return { status: 'insufficient', wallet: await getUserWallet(env, id) }
+    }
+    return { status: 'updated', wallet: await getUserWallet(env, id) }
+  } catch (error) {
+    const existing = await database
+      .prepare(
+        'SELECT chat_id FROM nobull_wallet_transactions WHERE reference = ?',
+      )
+      .bind(reference)
+      .first<{ chat_id: string }>()
+    if (existing) {
+      return { status: 'duplicate', wallet: await getUserWallet(env, id) }
+    }
+    throw error
+  }
+}
+
+export async function recordWalletPurchase(
+  env: BackendEnvironment,
+  chatId: string | number,
+  amountToman: number,
+  orderId: string,
+): Promise<WalletChangeResult> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  if (
+    !Number.isSafeInteger(amountToman) ||
+    amountToman <= 0 ||
+    amountToman > 1_000_000_000 ||
+    !/^[a-f0-9-]{16,64}$/i.test(orderId)
+  ) {
+    throw new Error('Wallet purchase details are invalid.')
+  }
+  const id = String(chatId)
+  const now = Date.now()
+  try {
+    const results = await database.batch([
+      database
+        .prepare(
+          `UPDATE nobull_wallet_accounts
+           SET balance_toman = balance_toman - ?,
+               total_spent_toman = total_spent_toman + ?,
+               orders_count = orders_count + 1,
+               updated_at = ?
+           WHERE chat_id = ? AND balance_toman >= ?`,
+        )
+        .bind(amountToman, amountToman, now, id, amountToman),
+      database
+        .prepare(
+          `INSERT INTO nobull_wallet_transactions
+           (chat_id, delta_toman, reference, reason, created_at)
+           SELECT ?, ?, ?, 'purchase', ? WHERE changes() = 1`,
+        )
+        .bind(id, -amountToman, `purchase:${orderId}`, now),
+    ])
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return { status: 'insufficient', wallet: await getUserWallet(env, id) }
+    }
+    return { status: 'updated', wallet: await getUserWallet(env, id) }
+  } catch (error) {
+    const existing = await database
+      .prepare(
+        'SELECT chat_id FROM nobull_wallet_transactions WHERE reference = ?',
+      )
+      .bind(`purchase:${orderId}`)
+      .first<{ chat_id: string }>()
+    if (existing) {
+      return { status: 'duplicate', wallet: await getUserWallet(env, id) }
+    }
+    throw error
+  }
+}
 
 export type EffectiveSettings = Awaited<ReturnType<typeof getEffectiveSettings>>
 
@@ -322,8 +587,23 @@ export async function getEffectiveSettings(
 
 export function getProfitMarginPercent(
   priceUsd: number,
-  settings: Pick<AdminSettings, 'profitMarginPercent' | 'profitMarginTiers'>,
+  settings: Pick<
+    AdminSettings,
+    'profitMarginPercent' | 'profitMarginTiers' | 'productOverrides'
+  >,
+  productId?: string,
 ): number {
+  const override = productId
+    ? settings.productOverrides?.[productId]?.customMarginPercent
+    : undefined
+  if (
+    typeof override === 'number' &&
+    Number.isFinite(override) &&
+    override >= 0 &&
+    override <= 1000
+  ) {
+    return override
+  }
   if (!Number.isFinite(priceUsd) || priceUsd < 0) {
     return settings.profitMarginPercent ?? 0
   }
@@ -342,18 +622,68 @@ export function calculateProductPriceToman(
   usdtRate: number,
   settings: Pick<
     AdminSettings,
-    'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+    | 'profitMarginPercent'
+    | 'profitMarginTiers'
+    | 'fixedFeeToman'
+    | 'productOverrides'
   >,
+  productId?: string,
 ): number {
+  const customPrice = productId
+    ? settings.productOverrides?.[productId]?.customPriceToman
+    : undefined
+  if (
+    typeof customPrice === 'number' &&
+    Number.isFinite(customPrice) &&
+    customPrice >= 0
+  ) {
+    return Math.round(customPrice)
+  }
   return (
     Math.ceil(
       (priceUsd *
         usdtRate *
-        (1 + getProfitMarginPercent(priceUsd, settings) / 100) +
+        (1 + getProfitMarginPercent(priceUsd, settings, productId) / 100) +
         (settings.fixedFeeToman ?? 0)) /
         1000,
     ) * 1000
   )
+}
+
+export function findActiveDiscountCode(
+  codes: PromoCode[] | undefined,
+  input: string,
+  now = Date.now(),
+): PromoCode | null {
+  const code = input.trim().toUpperCase()
+  if (!code) return null
+  const match = codes?.find(
+    (candidate) =>
+      candidate.code.toUpperCase() === code &&
+      candidate.active &&
+      candidate.usedCount < candidate.maxUses &&
+      (!candidate.expiresAt || Date.parse(candidate.expiresAt) > now),
+  )
+  if (
+    !match ||
+    !Number.isFinite(match.value) ||
+    match.value <= 0 ||
+    (match.type === 'percent' && match.value > 100)
+  ) {
+    return null
+  }
+  return match
+}
+
+export function applyDiscountToPrice(
+  priceToman: number,
+  discount: PromoCode,
+): number {
+  const discountToman =
+    discount.type === 'percent'
+      ? Math.round((priceToman * discount.value) / 100)
+      : Math.round(discount.value)
+  return Math.max(0, priceToman - discountToman)
 }
 
 function isProviderConfig(value: unknown): value is ProviderConfig {
@@ -478,5 +808,6 @@ export function settingsRevision(settings: AdminSettings): string {
     settings.usdtMode ?? '',
     settings.fixedFeeToman ?? 0,
     settings.activeProviderId ?? '',
+    JSON.stringify(settings.productOverrides ?? {}),
   ].join('-')
 }

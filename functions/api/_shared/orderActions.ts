@@ -11,6 +11,11 @@ import {
   type StoredOrder,
 } from './settings'
 import { formatDelivery, sendMessage, type TelegramEnvironment } from './telegram'
+import {
+  getPersianLoginInstructions,
+  getPersianWarrantyDescription,
+} from '../../../src/utils/persianTranslator'
+import { decryptDelivery, encryptDelivery } from './vault'
 
 export interface OrderActionEnvironment extends BackendEnvironment, TelegramEnvironment {
   TELEGRAM_ADMIN_CHAT_ID?: string
@@ -50,6 +55,9 @@ export async function decideStoredOrder(
   }
   const order = await getOrder(env, orderId)
   if (!order) throw new Error('Order not found.')
+  if (!/^\d+$/.test(order.userId) || Number(order.userId) <= 0) {
+    throw new Error('Order recipient is not a private user.')
+  }
   if (
     order.status !== 'waiting_review' &&
     !(action === 'reject' && order.status === 'pending_receipt')
@@ -74,6 +82,36 @@ export async function decideStoredOrder(
 
   const provider = getProviders(env).find((item) => item.id === order.provider)
   if (!provider) throw new Error(`Unknown provider ${order.provider}.`)
+  if (!env.VAULT_ENCRYPTION_KEY) {
+    throw new Error('VAULT_ENCRYPTION_KEY is not configured.')
+  }
+  if (order.deliveredCredentials) {
+    const delivery = formatDelivery(
+      await decryptDelivery(
+        env.VAULT_ENCRYPTION_KEY,
+        order.deliveredCredentials,
+      ),
+    )
+    await sendMessage(
+      env,
+      order.userId,
+      `✅ سفارش شما آماده است.\n\n${delivery}\n\n${getPersianWarrantyDescription(order.productWarrantySource, order.productDescription)}\n\n${getPersianLoginInstructions(order.productWarrantySource, order.productDescription, delivery)}`,
+    )
+    const completed: StoredOrder = {
+      ...order,
+      status: 'completed',
+      updatedAt: Date.now(),
+      completedAt: Date.now(),
+    }
+    await saveOrder(env, completed)
+    await upsertCustomer(
+      env,
+      order.userId,
+      { username: order.username, firstName: order.firstName },
+      { completedOrders: 1, totalSpentToman: order.priceToman },
+    )
+    return completed
+  }
   const apiKey = getProviderKey(env, provider)
   if (!apiKey) throw new Error(`Provider ${provider.id} is not configured.`)
   const headers = providerHeaders(provider, apiKey)
@@ -108,15 +146,25 @@ export async function decideStoredOrder(
 
   const result = unwrapOrder(await response.json())
   if (result.delivery) {
+    const deliveredCredentials = await encryptDelivery(
+      env.VAULT_ENCRYPTION_KEY,
+      result.delivery,
+    )
+    const deliveredOrder: StoredOrder = {
+      ...processing,
+      deliveredCredentials,
+      updatedAt: Date.now(),
+    }
+    await saveOrder(env, deliveredOrder)
     const delivery = formatDelivery(result.delivery)
     if (!delivery) throw new Error('Provider returned an empty delivery.')
     await sendMessage(
       env,
       order.userId,
-      `✅ سفارش شما آماده است.\n\n${delivery}`,
+      `✅ سفارش شما آماده است.\n\n${delivery}\n\n${getPersianWarrantyDescription(order.productWarrantySource, order.productDescription)}\n\n${getPersianLoginInstructions(order.productWarrantySource, order.productDescription, delivery)}`,
     )
     const completed: StoredOrder = {
-      ...processing,
+      ...deliveredOrder,
       status: 'completed',
       updatedAt: Date.now(),
       completedAt: Date.now(),

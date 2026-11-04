@@ -2,10 +2,16 @@ import { callTelegram } from './telegram'
 import type { TelegramEnvironment } from './telegram'
 import {
   calculateProductPriceToman,
+  listStoredOrders,
   type AdminSettings,
+  type BackendEnvironment,
   type ProviderConfig,
 } from './settings'
-import { translateProductText } from '../../../src/utils/persianTranslator'
+import {
+  getPersianDeliveryDescription,
+  getPersianWarrantyDescription,
+  translateProductText,
+} from '../../../src/utils/persianTranslator'
 
 export interface UserRegistryKV {
   get(key: string): Promise<string | null>
@@ -25,7 +31,8 @@ export interface UserRegistryKV {
   }>
 }
 
-export interface BroadcastEnvironment extends TelegramEnvironment {
+export interface BroadcastEnvironment
+  extends TelegramEnvironment, BackendEnvironment {
   TELEGRAM_BOT_USERNAME?: string
   NOBULL_USERS?: UserRegistryKV
 }
@@ -40,6 +47,7 @@ export interface BroadcastProduct {
   pricing: Pick<
     AdminSettings,
     'profitMarginPercent' | 'profitMarginTiers' | 'fixedFeeToman'
+    | 'productOverrides'
   >
 }
 
@@ -91,38 +99,19 @@ function persianProductDetails(
   const source = product.source
   const title =
     text(source.name ?? source.title ?? source.product_name) || 'اشتراک جدید'
-  const brand = text(source.brand ?? source.brand_name)
+  const brand = translateProductText(
+    text(source.brand ?? source.brand_name),
+  )
   const category = text(source.category ?? source.category_name)
   const description = text(source.description ?? source.subtitle)
-  const durationRules: [RegExp, string][] = [
-    [/\b12\s*months?\b|\b1\s*year\b/i, 'مدت: ۱۲ ماهه'],
-    [/\b6\s*months?\b/i, 'مدت: ۶ ماهه'],
-    [/\b3\s*months?\b/i, 'مدت: ۳ ماهه'],
-    [/\b1\s*month\b|\b30\s*days?\b/i, 'مدت: ۱ ماهه'],
-    [/\b7\s*days?\b|\b1\s*week\b/i, 'مدت: ۷ روزه'],
-  ]
   const details = [
     `دسته‌بندی: ${persianCategory(`${category} ${brand} ${title}`)}`,
   ]
-  const duration = durationRules.find(([pattern]) =>
-    pattern.test(`${title} ${description}`),
-  )
-  if (duration) details.push(duration[1])
-  if (/\b(private|personal)\b/i.test(`${title} ${description}`)) {
-    details.push('نوع اکانت: شخصی')
-  } else if (/\b(shared|slot)\b/i.test(`${title} ${description}`)) {
-    details.push('نوع اکانت: اشتراکی')
-  }
-  if (/\b(full warranty|fw)\b/i.test(`${title} ${description}`)) {
-    details.push('گارانتی: مطابق توضیحات محصول')
-  }
+  details.push(`روش تحویل: ${getPersianDeliveryDescription(title, description)}`)
+  details.push(getPersianWarrantyDescription(title, description))
   if (brand) details.push(`برند: ${brand}`)
-  if (description) {
-    details.push(`توضیحات: ${translateProductText(description)}`)
-  }
-  const translatedTitle = translateProductText(title)
-  if (translatedTitle !== title) details.push(`نام فنی: ${title}`)
-  return { title: translatedTitle || title, details }
+  if (description) details.push(`توضیحات: ${translateProductText(description)}`)
+  return { title: translateProductText(title) || 'اشتراک جدید', details }
 }
 
 function purchaseUrl(
@@ -149,14 +138,15 @@ async function broadcastProduct(
     product.priceUsd,
     product.usdtRate,
     product.pricing,
+    product.id,
   )
   const message = [
-    '✨ محصول جدید به فروشگاه نوبول اضافه شد!',
+    '🚀 محصول جدید به نوبول اضافه شد!',
     '',
-    details.title,
+    `💠 ${details.title}`,
     '',
     ...details.details,
-    `قیمت نهایی: ${new Intl.NumberFormat('fa-IR').format(priceToman)} تومان`,
+    `💰 قیمت نهایی با قیمت‌گذاری پلکانی: ${new Intl.NumberFormat('fa-IR').format(priceToman)} تومان`,
     '',
     'قیمت شفاف، خرید با اطلاع از شرایط محصول.',
   ].join('\n')
@@ -164,11 +154,24 @@ async function broadcastProduct(
     inline_keyboard: [
       [
         {
-          text: 'خرید آنی',
+          text: '🛒 خرید آنی و امن',
           url: purchaseUrl(env, product),
         },
       ],
     ],
+  }
+
+  if (env.TELEGRAM_ADMIN_CHAT_ID) {
+    try {
+      await callTelegram(env, 'sendMessage', {
+        chat_id: env.TELEGRAM_ADMIN_CHAT_ID,
+        text: message.slice(0, 4096),
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup,
+      })
+    } catch {
+      console.warn('New product announcement could not be delivered to admin.')
+    }
   }
 
   let cursor: string | undefined
@@ -189,6 +192,7 @@ async function broadcastProduct(
           if (await env.NOBULL_USERS?.get(deliveryKey)) return
           const chatId = await env.NOBULL_USERS?.get(name)
           if (!chatId) return
+          if (chatId === env.TELEGRAM_ADMIN_CHAT_ID) return
           try {
             await callTelegram(env, 'sendMessage', {
               chat_id: chatId,
@@ -235,6 +239,116 @@ async function broadcastProduct(
     failed,
   })
   return failed === 0
+}
+
+export interface CustomBroadcastOptions {
+  message: string
+  audience: 'all' | 'buyers'
+  button?: { text: string; url: string }
+}
+
+export interface CustomBroadcastResult {
+  sentCount: number
+  failedCount: number
+  totalTargeted: number
+}
+
+function isBlockedUserError(error: unknown): boolean {
+  const reason = error instanceof Error ? error.message.toLowerCase() : ''
+  return /bot was blocked|chat not found|user is deactivated|bot can't initiate conversation/.test(
+    reason,
+  )
+}
+
+export async function sendCustomBroadcast(
+  env: BroadcastEnvironment,
+  options: CustomBroadcastOptions,
+): Promise<CustomBroadcastResult> {
+  if (!env.NOBULL_USERS || !env.TELEGRAM_BOT_TOKEN) {
+    throw new Error('User registry or Telegram bot is not configured.')
+  }
+
+  const targets = new Set<string>()
+  if (options.audience === 'buyers') {
+    const orders = await listStoredOrders(env)
+    for (const order of orders) {
+      if (order.status === 'completed') targets.add(order.userId)
+    }
+  } else {
+    let cursor: string | undefined
+    do {
+      const page = await env.NOBULL_USERS.list({
+        prefix: REGISTRATION_PREFIX,
+        cursor,
+      })
+      const values = await Promise.all(
+        page.keys.map(({ name }) => env.NOBULL_USERS!.get(name)),
+      )
+      values.forEach((value) => {
+        if (value) targets.add(value)
+      })
+      if (!page.list_complete && !page.cursor) {
+        throw new Error('User registry returned an incomplete subscriber page.')
+      }
+      cursor = page.list_complete ? undefined : page.cursor
+    } while (cursor)
+  }
+
+  const replyMarkup = options.button
+    ? {
+        inline_keyboard: [[{
+          text: options.button.text,
+          url: options.button.url,
+        }]],
+      }
+    : undefined
+  const recipients = [...targets]
+  let sentCount = 0
+  let failedCount = 0
+
+  for (let index = 0; index < recipients.length; index += 20) {
+    const batch = recipients.slice(index, index + 20)
+    const results = await Promise.allSettled(
+      batch.map(async (chatId) => {
+        try {
+          await callTelegram(env, 'sendMessage', {
+            chat_id: chatId,
+            text: options.message,
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          })
+          sentCount += 1
+        } catch (error) {
+          failedCount += 1
+          if (isBlockedUserError(error)) {
+            try {
+              await env.NOBULL_USERS?.delete(`${REGISTRATION_PREFIX}${chatId}`)
+            } catch (pruneError) {
+              console.warn('Blocked broadcast recipient could not be pruned.', {
+                error:
+                  pruneError instanceof Error
+                    ? pruneError.message
+                    : 'Unknown error',
+              })
+            }
+          }
+          console.warn('Custom broadcast delivery failed for a user.', {
+            blocked: isBlockedUserError(error),
+          })
+        }
+      }),
+    )
+    for (const result of results) {
+      if (result.status === 'rejected') failedCount += 1
+    }
+  }
+
+  return {
+    sentCount,
+    failedCount,
+    totalTargeted: recipients.length,
+  }
 }
 
 export async function detectAndBroadcastProducts(

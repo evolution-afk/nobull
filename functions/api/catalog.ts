@@ -6,6 +6,7 @@ import {
 import {
   getEffectiveSettings,
   calculateProductPriceToman,
+  getProfitMarginPercent,
   getProviderKey,
   getProviders,
   providerHeaders,
@@ -15,6 +16,8 @@ import {
   type BackendEnvironment,
   type ProviderConfig,
 } from './_shared/settings'
+import { authenticateAdminRequest } from './admin'
+import { translateProductText } from '../../src/utils/persianTranslator'
 
 interface CatalogEnvironment
   extends BackendEnvironment, BroadcastEnvironment {
@@ -71,6 +74,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
+}
+
+function productText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number') return String(value)
+  const record = asRecord(value)
+  return record
+    ? productText(record.name ?? record.title ?? record.label)
+    : ''
 }
 
 function extractProducts(payload: unknown): unknown[] | null {
@@ -192,18 +204,46 @@ function calculateProducts(
     if (!Number.isFinite(price) || price < 0) return []
 
     const rawId = record.id ?? record.product_id ?? record.uuid
+    const productId = rawId === undefined || rawId === null
+      ? undefined
+      : `${provider.id}--${String(rawId)}`
     const clean: Record<string, unknown> = {}
     for (const field of PRODUCT_FIELDS) {
       if (field in record) clean[field] = record[field]
     }
+    clean.persian_name = translateProductText(
+      productText(record.name ?? record.title ?? record.product_name) ||
+        'محصول دیجیتال',
+    )
+    clean.persian_description = translateProductText(
+      productText(record.description ?? record.subtitle),
+    )
+    clean.persian_brand = translateProductText(
+      productText(record.brand ?? record.brand_name),
+    )
     if (rawId !== undefined && rawId !== null) {
       clean.provider_product_id = String(rawId)
-      clean.id = `${provider.id}--${String(rawId)}`
+      clean.id = productId
     }
     clean.provider_id = provider.id
     clean.provider_name = provider.name
     clean.price_usd = price
-    clean.price_toman = calculateProductPriceToman(price, usdtRate, settings)
+    clean.price_toman = calculateProductPriceToman(
+      price,
+      usdtRate,
+      settings,
+      productId,
+    )
+    clean.appliedMarginPercent = getProfitMarginPercent(
+      price,
+      settings,
+      productId,
+    )
+    const override = productId
+      ? settings.productOverrides?.[productId]
+      : undefined
+    clean.featured = override?.featured === true
+    clean.hidden = override?.hidden === true
     clean.usdt_rate_used = usdtRate
     return [clean]
   })
@@ -235,6 +275,20 @@ export async function onRequestGet({
   env,
   waitUntil,
 }: CatalogFunctionContext): Promise<Response> {
+  const url = new URL(request.url)
+  const wantsHiddenProducts = url.searchParams.get('includeHidden') === '1'
+  const adminAuthorized =
+    request.headers.has('Authorization') &&
+    (await authenticateAdminRequest(request, env))
+  if (wantsHiddenProducts && !adminAuthorized) {
+    return jsonResponse(
+      { error: 'Admin authentication is required for hidden products.' },
+      401,
+      'no-store',
+      'BYPASS',
+    )
+  }
+
   let settings: Awaited<ReturnType<typeof getEffectiveSettings>>
   let providers: ProviderConfig[]
   try {
@@ -267,6 +321,7 @@ export async function onRequestGet({
   const cache = (globalThis.caches as CloudflareCacheStorage).default
   const cacheUrl = new URL('/api/catalog', request.url)
   cacheUrl.searchParams.set('revision', settingsRevision(settings))
+  cacheUrl.searchParams.set('scope', wantsHiddenProducts ? 'admin' : 'public')
   cacheUrl.searchParams.set(
     'providers',
     configuredProviders.map(({ id }) => id).sort().join(','),
@@ -305,7 +360,10 @@ export async function onRequestGet({
         ),
       }),
     )
-    const products = calculatedProducts.flatMap(({ products }) => products)
+    const allProducts = calculatedProducts.flatMap(({ products }) => products)
+    const products = wantsHiddenProducts
+      ? allProducts
+      : allProducts.filter((product) => product.hidden !== true)
     const newProductCandidates: BroadcastProduct[] = calculatedProducts.flatMap(
       ({ provider, products: providerProducts }) =>
         providerProducts
@@ -313,7 +371,8 @@ export async function onRequestGet({
             (product) =>
               typeof product.id === 'string' &&
               typeof product.provider_product_id === 'string' &&
-              Number.isFinite(Number(product.price_toman)),
+              Number.isFinite(Number(product.price_toman)) &&
+              product.hidden !== true,
           )
           .map((product) => ({
             id: String(product.id),
@@ -325,9 +384,11 @@ export async function onRequestGet({
             pricing: settings,
           })),
     )
-    const broadcast = detectAndBroadcastProducts(env, newProductCandidates)
-    if (waitUntil) waitUntil(broadcast)
-    else await broadcast
+    if (adminAuthorized) {
+      const broadcast = detectAndBroadcastProducts(env, newProductCandidates)
+      if (waitUntil) waitUntil(broadcast)
+      else await broadcast
+    }
     const body = {
       products,
       usdt_rate_used: usdtRate,

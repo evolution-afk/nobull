@@ -7,13 +7,17 @@ import {
 } from 'react'
 import * as OTPAuth from 'otpauth'
 import {
+  getPersianLoginInstructions,
   getPersianDeliveryDescription,
   getPersianProductBadges,
+  getPersianWarrantyDescription,
   translateProductText,
 } from './utils/persianTranslator'
 import { resolveBrandAsset, type BrandAsset } from './utils/brandAssets'
 import {
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
   Beef,
   Check,
   ChevronDown,
@@ -40,17 +44,20 @@ interface Product {
   providerId: string
   providerProductId: string
   name: string
+  persianName: string
   brand: string
   brandKey: string
   brandAsset: BrandAsset
   category: string
   persianCategory: string
   description: string
+  persianDescription: string
   price_toman: number
   usdt_rate_used: number | null
   stock: number | null
   status: StockStatus
   purchaseUrl: string | null
+  featured: boolean
 }
 
 interface ProductRecord {
@@ -669,6 +676,9 @@ function normalizeProducts(payload: unknown): Product[] {
       const record = asRecord(item)
       const id = asText(record.id ?? record.product_id ?? record.uuid)
       const name = asText(record.name ?? record.title ?? record.product_name)
+      const persianName =
+        asText(record.persian_name) || translateProductText(name)
+      if (record.hidden === true) return null
       const priceToman = Number(record.price_toman)
       if (!id || !name || !Number.isFinite(priceToman) || priceToman < 0) {
         return null
@@ -686,6 +696,7 @@ function normalizeProducts(payload: unknown): Product[] {
         id.replace(new RegExp(`^${providerId}--`), '')
       const brandAsset = resolveBrandAsset(
         name,
+        persianName,
         brand,
         category,
         asText(record.description ?? record.subtitle),
@@ -716,6 +727,9 @@ function normalizeProducts(payload: unknown): Product[] {
         category,
         persianCategory,
         description: asText(record.description ?? record.subtitle),
+        persianDescription:
+          asText(record.persian_description) ||
+          translateProductText(asText(record.description ?? record.subtitle)),
         price_toman: priceToman,
         usdt_rate_used: Number.isFinite(Number(record.usdt_rate_used))
           ? Number(record.usdt_rate_used)
@@ -723,6 +737,7 @@ function normalizeProducts(payload: unknown): Product[] {
         stock,
         status,
         purchaseUrl: purchaseUrl || null,
+        featured: record.featured === true,
       }
     })
     .filter((product): product is Product => product !== null)
@@ -742,9 +757,12 @@ function stockLabel(product: Product): string {
   return 'استعلام موجودی'
 }
 
-function telegramUrl(product: Product): string | null {
+function telegramUrl(product: Product, discountCode?: string): string | null {
   const username = telegramBotUsername || 'NoBullShopBot'
-  const startPayload = `buy_${product.providerId}_${product.providerProductId}`
+  const startPayload =
+    `buy_${product.providerId}_${product.providerProductId}` +
+    (discountCode ? `_${discountCode}` : '')
+  if (new TextEncoder().encode(startPayload).length > 64) return null
   return `https://t.me/${username}?start=${encodeURIComponent(startPayload)}`
 }
 
@@ -765,6 +783,7 @@ function App() {
   const [totpInput, setTotpInput] = useState('')
   const [now, setNow] = useState(0)
   const [copyMessage, setCopyMessage] = useState('')
+  const [featuredIndex, setFeaturedIndex] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -874,6 +893,29 @@ function App() {
       return matchesCategory && matchesQuery && matchesBrand
     })
   }, [products, query, selectedBrand, selectedCategory])
+
+  const featuredProducts = useMemo(() => {
+    const activationPattern =
+      /\bcdk\b|\bkey\b|\binvite\b|personal.?activat|personal.?account|اکانت شخصی|فعال‌سازی شخصی|دعوت/i
+    return products.filter(
+      (product) =>
+        product.featured ||
+        activationPattern.test(
+          `${product.name} ${product.description} ${product.brand}`,
+        ),
+    )
+  }, [products])
+  const currentFeatured =
+    featuredProducts[featuredIndex % Math.max(featuredProducts.length, 1)]
+
+  useEffect(() => {
+    if (featuredProducts.length < 2) return
+    const timer = window.setInterval(
+      () => setFeaturedIndex((current) => (current + 1) % featuredProducts.length),
+      6000,
+    )
+    return () => window.clearInterval(timer)
+  }, [featuredProducts.length])
 
   const brandGroups = useMemo(() => {
     const groups = new Map<string, Product[]>()
@@ -1118,6 +1160,99 @@ function App() {
                     label="ابزار کد ۲ مرحله‌ای"
                   />
                 </div>
+              </div>
+            </section>
+
+            <section
+              aria-roledescription="carousel"
+              aria-label="پیشنهادهای ویژه فعال‌سازی شخصی"
+              className="relative mt-5 overflow-hidden rounded-[26px] border border-orange-300/20 bg-[linear-gradient(115deg,rgba(56,24,12,0.72),rgba(12,13,16,0.96)_55%,rgba(28,19,10,0.92))] p-5 shadow-[0_18px_60px_rgba(255,111,0,0.08)] sm:mt-6 sm:p-7"
+            >
+              <div className="pointer-events-none absolute -left-10 -top-16 h-48 w-48 rounded-full bg-orange-400/[0.08] blur-3xl" />
+              <div className="relative flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-[10px] font-semibold tracking-[0.12em] text-orange-200/70">
+                    NO BULL • CURATED FOR YOU
+                  </p>
+                  <h2 className="mt-2 text-lg font-extrabold leading-8 text-white sm:text-xl">
+                    🔥 پیشنهادی ویژه: فعال‌سازی روی اکانت شخصی شما
+                  </h2>
+                  <p className="mt-1 text-[11px] leading-6 text-white/55">
+                    محصولات دارای کد، کلید فعال‌سازی، دعوت‌نامه یا تحویل شخصی؛ روش، مدت و ضمانت هر محصول را پیش از سفارش بررسی کنید.
+                  </p>
+                </div>
+                {currentFeatured && (
+                  <div
+                    key={currentFeatured.id}
+                    className="flex w-full items-center gap-4 rounded-2xl border border-white/[0.08] bg-black/30 p-4 sm:w-auto sm:min-w-[360px]"
+                  >
+                    <BrandLogo
+                      asset={currentFeatured.brandAsset}
+                      className="h-12 w-12 rounded-xl"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-bold text-white">
+                        {translateProductText(currentFeatured.name)}
+                      </p>
+                      <p className="mt-1 text-[10px] text-white/45">
+                        {currentFeatured.brand} · {formatToman(currentFeatured.price_toman)}
+                      </p>
+                      {currentFeatured.featured && (
+                        <span className="mt-1 inline-block text-[9px] text-amber-200">پیشنهاد منتخب نوبول</span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedProduct(currentFeatured)}
+                      className="shrink-0 rounded-xl bg-orange-300 px-3 py-2 text-[10px] font-bold text-black transition hover:bg-orange-200"
+                    >
+                      جزئیات و خرید
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="relative mt-4 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFeaturedIndex((current) =>
+                        (current - 1 + featuredProducts.length) %
+                        Math.max(featuredProducts.length, 1),
+                      )
+                    }
+                    disabled={featuredProducts.length < 2}
+                    aria-label="پیشنهاد قبلی"
+                    className="rounded-full border border-white/10 p-2 text-white/65 disabled:opacity-30"
+                  >
+                    <ChevronRight size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFeaturedIndex((current) =>
+                        (current + 1) % Math.max(featuredProducts.length, 1),
+                      )
+                    }
+                    disabled={featuredProducts.length < 2}
+                    aria-label="پیشنهاد بعدی"
+                    className="rounded-full border border-white/10 p-2 text-white/65 disabled:opacity-30"
+                  >
+                    <ChevronLeft size={15} />
+                  </button>
+                  <span className="text-[10px] text-white/35">
+                    {featuredProducts.length
+                      ? `${new Intl.NumberFormat('fa-IR').format(featuredIndex + 1)} از ${new Intl.NumberFormat('fa-IR').format(featuredProducts.length)} پیشنهاد`
+                      : loading ? 'در حال بارگذاری پیشنهادها…' : 'پیشنهاد شخصی تازه به‌زودی'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={scrollToProducts}
+                  className="text-[10px] font-semibold text-orange-100/70 hover:text-orange-100"
+                >
+                  مشاهده همه محصولات
+                </button>
               </div>
             </section>
 
@@ -1636,8 +1771,97 @@ function BrandLogo({
   asset: BrandAsset
   className?: string
 }) {
-  const [failed, setFailed] = useState(false)
-
+  const color = `#${asset.color}`
+  let mark: ReactNode
+  switch (asset.slug) {
+    case 'openai':
+      mark = <path d="M12 3.2a4 4 0 0 1 3.9 3.1 4 4 0 0 1 3.4 5.2 4 4 0 0 1-1 6.4 4 4 0 0 1-6.2 2.2 4 4 0 0 1-6.6-2.1 4 4 0 0 1-2.7-5.8 4 4 0 0 1 2.9-6.1A4 4 0 0 1 12 3.2Zm0 3.1-3.3 1.9v3.7l3.3 1.9 3.3-1.9V8.2L12 6.3Zm-5.1 3-2.3 1.3v3.8l3.3 1.9 2.3-1.3v-1.2l-3.3-1.9V9.3Zm10.2 0v2.6l-3.3 1.9V15l2.3 1.3 3.3-1.9v-3.8l-2.3-1.3Zm-8.2 5.4v2.6l3.3 1.9 3.3-1.9v-2.6L12 17.6l-3.1-1.8Z" fill="currentColor" />
+      break
+    case 'claude':
+      mark = <g stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M12 2.5v4M12 17.5v4M2.5 12h4m11 0h4M5.3 5.3l2.8 2.8m7.8 7.8 2.8 2.8m0-13.4-2.8 2.8m-7.8 7.8-2.8 2.8" /><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" /></g>
+      break
+    case 'grok':
+      mark = <path d="M5 4 19 20M19 4 5 20" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+      break
+    case 'cursor':
+      mark = <path d="M5 3.5 19.5 13l-6.7 1.2-3.2 5.7L5 3.5Z" fill="currentColor" stroke="white" strokeWidth="1.2" strokeLinejoin="round" />
+      break
+    case 'perplexity':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"><path d="M4 5h5v5H4zM15 5h5v5h-5zM4 14h5v5H4zM15 14h5v5h-5zM9 7.5h6M6.5 10v4m11-4v4M9 16.5h6" /><path d="m9 10 3 2 3-2m-6 4 3-2 3 2" /></g>
+      break
+    case 'midjourney':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 19 8 6l4 9 4-9 5 13M5 14h14" /><circle cx="12" cy="4" r="1.2" fill="currentColor" stroke="none" /></g>
+      break
+    case 'gemini':
+      mark = <path d="M12 2.5c1.2 4.7 2.8 7 9.5 9.5-6.7 2.5-8.3 4.8-9.5 9.5-1.2-4.7-2.8-7-9.5-9.5 6.7-2.5 8.3-4.8 9.5-9.5Z" fill="currentColor" />
+      break
+    case 'google':
+      mark = <g fill="none" strokeWidth="3.2"><path d="M20 12a8 8 0 1 1-2.4-5.7" stroke="#4285F4" /><path d="M17.6 6.3 20 8.5" stroke="#34A853" /><path d="M4.6 7.2A8 8 0 0 1 17.6 6.3" stroke="#EA4335" /><path d="M4.6 16.8A8 8 0 0 1 3.2 12" stroke="#FBBC05" /></g>
+      break
+    case 'canva':
+      mark = <text x="12" y="19" textAnchor="middle" fontSize="19" fontWeight="700" fontStyle="italic" fill="currentColor">C</text>
+      break
+    case 'spotify':
+      mark = <g><circle cx="12" cy="12" r="10" fill="currentColor" /><path d="M6.2 9.1c4.2-1.3 8.5-.8 11.6 1" fill="none" stroke="#071012" strokeWidth="1.5" strokeLinecap="round" /><path d="M7.1 12c3.4-1 7-.6 9.7.9M8 14.8c2.7-.7 5.3-.4 7.5.8" fill="none" stroke="#071012" strokeWidth="1.35" strokeLinecap="round" /></g>
+      break
+    case 'youtube':
+      mark = <g><rect x="2.5" y="5" width="19" height="14" rx="4" fill="currentColor" /><path d="m10 8.5 5.5 3.5-5.5 3.5v-7Z" fill="#fff" /></g>
+      break
+    case 'netflix':
+      mark = <path d="M5 3h4l6 12V3h4v18l-4 .2L9 9v12H5V3Z" fill="currentColor" />
+      break
+    case 'apple':
+      mark = <path d="M16.5 3.3c-.1 1.5-1 2.9-2.2 3.7-1 .7-2.3 1.1-3.5 1 .1-1.4.8-2.7 1.8-3.6 1-.9 2.5-1.4 3.9-1.1ZM19.7 16.8c-.5 1.2-.8 1.7-1.5 2.7-1 1.4-2.4 3.1-4.1 3.1-1.5 0-1.9-1-4-.9-2 .1-2.5 1-4 .9-1.7-.1-3-1.6-4-3-2.8-4-3.1-8.7-1.3-11.2 1.3-1.8 3.4-2.8 5.3-2.8 1.7 0 2.8 1 4.1 1 1.3 0 2.1-1 4.3-1 1.7 0 3.5.9 4.8 2.3-4.2 2.3-3.6 8.2.4 8.9Z" fill="currentColor" transform="translate(2 0) scale(.83)" />
+      break
+    case 'telegram':
+      mark = <path d="m3 11.4 17.7-7.1c.8-.3 1.5.2 1.2 1.5l-3 14.2c-.2 1-.8 1.3-1.6.8l-4.8-3.5-2.3 2.3c-.3.3-.5.5-1 .5l.4-4.9 9-8.1c.4-.4-.1-.6-.6-.2L7 13.8l-4.7-1.5c-1-.3-1-1 .7-1Z" fill="currentColor" />
+      break
+    case 'capcut':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M4 7h5l11 10h-5L4 7Zm0 10h5L20 7h-5L4 17Z" /></g>
+      break
+    case 'tradingview':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 19V5m0 14h18M6 15l4-4 3 2 5-7" /><path d="M15 6h3v3" /></g>
+      break
+    case 'jetbrains':
+      mark = <g><path d="m12 2 9 5v10l-9 5-9-5V7l9-5Z" fill="currentColor" /><path d="M7 8h3v3H7zm7 0h3v3h-3zm-7 6h10v2H7z" fill="#101114" /></g>
+      break
+    case 'linkedin':
+      mark = <g fill="currentColor"><rect x="3" y="8" width="4" height="13" rx="1" /><circle cx="5" cy="4.5" r="2" /><path d="M10 8h4v1.8c.7-1.3 2-2.2 3.8-2.2 3.2 0 4.2 2.1 4.2 5.4V21h-4v-5.9c0-1.4 0-3.2-2-3.2s-2.3 1.5-2.3 3.1V21h-4V8Z" /></g>
+      break
+    case 'grammarly':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="2.2"><circle cx="12" cy="12" r="9" /><path d="M17 10a5.5 5.5 0 1 0 0 4h-4" strokeLinecap="round" /></g>
+      break
+    case 'duolingo':
+      mark = <g><path d="M4 7c0-2 3-4 8-4s8 2 8 4v7c0 5-3 8-8 8s-8-3-8-8V7Z" fill="currentColor" /><path d="M8 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm8 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM8 16c2.7 2 5.3 2 8 0" fill="none" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" /></g>
+      break
+    case 'discord':
+      mark = <g><path d="M6 5c4-2 8-2 12 0l3 13c-2 2-4 3-6 3l-1-2c1-.3 2-.7 3-1.4-3.3 1.5-6.7 1.5-10 0 1 .7 2 1.1 3 1.4l-1 2c-2 0-4-1-6-3L6 5Z" fill="currentColor" /><circle cx="9" cy="12" r="1.4" fill="#fff" /><circle cx="15" cy="12" r="1.4" fill="#fff" /></g>
+      break
+    case 'nordvpn':
+    case 'expressvpn':
+      mark = <path d="M12 2 20 5v6c0 5.3-3.2 9-8 11-4.8-2-8-5.7-8-11V5l8-3Zm0 3.2L7 7v4c0 3.6 1.8 6.2 5 7.9 3.2-1.7 5-4.3 5-7.9V7l-5-1.8Z" fill="currentColor" />
+      break
+    case 'category-ai':
+      mark = <g fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="8" /><path d="M12 7v10M7 12h10M8.5 8.5l7 7m0-7-7 7" /></g>
+      break
+    case 'category-code':
+      mark = <path d="m8 6-6 6 6 6m8-12 6 6-6 6m-2-14-4 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      break
+    case 'category-design':
+      mark = <path d="m4 16 11-11 4 4L8 20H4v-4Zm9-9 4 4M4 20l5-1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      break
+    case 'category-media':
+      mark = <g><rect x="3" y="5" width="18" height="14" rx="3" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="m10 9 5 3-5 3V9Z" fill="currentColor" /></g>
+      break
+    case 'category-privacy':
+      mark = <path d="M12 2 20 5v6c0 5.3-3.2 9-8 11-4.8-2-8-5.7-8-11V5l8-3Zm-3 10 2 2 4-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      break
+    case 'category-learning':
+      mark = <path d="M3 5c4-1 7 0 9 2 2-2 5-3 9-2v14c-4-1-7 0-9 2-2-2-5-3-9-2V5Zm9 2v14" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      break
+    default:
+      mark = <g fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="4" width="16" height="16" rx="5" /><path d="m8 12 2.5 2.5L16 9" strokeLinecap="round" strokeLinejoin="round" /></g>
+  }
   return (
     <span
       className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-white/[0.12] p-2 ${className}`}
@@ -1645,28 +1869,18 @@ function BrandLogo({
         background:
           asset.color === '000000'
             ? 'linear-gradient(145deg, #ffffff, #d4d4d8)'
-            : asset.color === 'FFFFFF'
-              ? 'linear-gradient(145deg, #27272a, #09090b)'
-              : `linear-gradient(145deg, #${asset.color}35, #${asset.color}10)`,
-        boxShadow: `0 0 24px #${asset.color}35`,
+            : `linear-gradient(145deg, ${color}35, ${color}10)`,
+        boxShadow: `0 0 24px ${color}35`,
       }}
     >
-      {asset.logoUrl && !failed ? (
-        <img
-          src={asset.logoUrl}
-          alt=""
-          loading="lazy"
-          className="h-full w-full object-contain"
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        <Sparkles
-          aria-hidden="true"
-          className="h-full w-full"
-          style={{ color: `#${asset.color}` }}
-          strokeWidth={1.7}
-        />
-      )}
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 24 24"
+        className="h-full w-full overflow-visible"
+        style={{ color }}
+      >
+        {mark}
+      </svg>
     </span>
   )
 }
@@ -1705,7 +1919,11 @@ function PlanRow({
   product: Product
   onSelect: () => void
 }) {
-  const persianTitle = translateProductText(product.name)
+  const persianTitle = product.persianName
+  const activationDescription = getPersianDeliveryDescription(
+    product.name,
+    product.description,
+  )
   return (
     <button
       type="button"
@@ -1717,11 +1935,13 @@ function PlanRow({
         <span className="block truncate text-xs font-bold text-emerald-100 underline decoration-emerald-300/35 underline-offset-4">
           {persianTitle}
         </span>
-        <span
-          dir="auto"
-          className="mt-1 block truncate text-[9px] text-white/30"
-        >
-          {product.name}
+        <span className="mt-2 block text-[9px] leading-5 text-white/55">
+          <strong className="text-cyan-100/75">روش فعال‌سازی: </strong>
+          {activationDescription}
+        </span>
+        <span className="mt-1 block text-[9px] leading-5 text-white/40">
+          <strong className="text-emerald-100/60">ضمانت و قواعد استفاده: </strong>
+          {getPersianWarrantyDescription(product.name, product.description)} نوع حساب و محدودیت اشتراک را پیش از پرداخت بررسی کنید و اطلاعات ورود را با دیگران به اشتراک نگذارید.
         </span>
       </span>
       <span className="flex shrink-0 flex-col items-end gap-1">
@@ -1866,10 +2086,96 @@ function PurchaseModal({
   onCopy: (value: string, successMessage?: string) => void
   copyMessage: string
 }) {
-  const tomanPrice = product.price_toman
-  const botUrl = telegramUrl(product)
-  const purchaseDetails = `NoBull order\nproduct_id: ${product.id}\nprice_toman: ${tomanPrice}`
-  const persianTitle = translateProductText(product.name)
+  const [discountInput, setDiscountInput] = useState('')
+  const [discountStatus, setDiscountStatus] = useState<
+    'idle' | 'checking' | 'valid' | 'invalid'
+  >('idle')
+  const [discountError, setDiscountError] = useState('')
+  const [discount, setDiscount] = useState<{
+    code: string
+    originalPriceToman: number
+    discountedPriceToman: number
+    discountToman: number
+  } | null>(null)
+
+  useEffect(() => {
+    if (discountStatus !== 'checking') return
+    const code = discountInput.trim()
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        code,
+        productId: product.id,
+      })
+      fetch(`/api/discount?${params.toString()}`, {
+        signal: controller.signal,
+        cache: 'no-store',
+      })
+        .then(async (response) => {
+          const payload = (await response.json()) as {
+            valid?: boolean
+            code?: string
+            originalPriceToman?: number
+            discountedPriceToman?: number
+            discountToman?: number
+            error?: string
+          }
+          if (!response.ok) {
+            throw new Error(payload.error || 'بررسی کد تخفیف ناموفق بود.')
+          }
+          if (
+            !payload.valid ||
+            typeof payload.code !== 'string' ||
+            typeof payload.originalPriceToman !== 'number' ||
+            typeof payload.discountedPriceToman !== 'number' ||
+            typeof payload.discountToman !== 'number'
+          ) {
+            throw new Error(payload.error || 'این کد تخفیف معتبر نیست.')
+          }
+          setDiscount({
+            code: payload.code,
+            originalPriceToman: payload.originalPriceToman,
+            discountedPriceToman: payload.discountedPriceToman,
+            discountToman: payload.discountToman,
+          })
+          setDiscountStatus('valid')
+          setDiscountError('')
+        })
+        .catch((cause: unknown) => {
+          if (cause instanceof DOMException && cause.name === 'AbortError') return
+          setDiscountStatus('invalid')
+          setDiscountError(
+            cause instanceof Error ? cause.message : 'بررسی کد تخفیف ناموفق بود.',
+          )
+        })
+    }, 350)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [discountInput, discountStatus, product.id])
+
+  const handleDiscountInput = (value: string) => {
+    const code = value.toUpperCase()
+    setDiscountInput(code)
+    setDiscount(null)
+    setDiscountError('')
+    if (!code.trim()) {
+      setDiscountStatus('idle')
+    } else if (!/^[A-Za-z0-9_-]{2,20}$/.test(code.trim())) {
+      setDiscountStatus('invalid')
+      setDiscountError('کد باید ۲ تا ۲۰ نویسه و شامل حروف انگلیسی یا عدد باشد.')
+    } else {
+      setDiscountStatus('checking')
+    }
+  }
+
+  const tomanPrice = discount?.discountedPriceToman ?? product.price_toman
+  const discountCode = discountStatus === 'valid' ? discount?.code : undefined
+  const botUrl = telegramUrl(product, discountCode)
+  const purchaseDetails = `سفارش نوبول\nشناسه محصول: ${product.id}\nمبلغ به تومان: ${new Intl.NumberFormat('fa-IR').format(tomanPrice)}${discountCode ? `\nکد تخفیف: ${discountCode}` : ''}`
+  const persianTitle = product.persianName
   const planBadges = getPersianProductBadges(product.name, product.description)
 
   return (
@@ -1910,8 +2216,8 @@ function PurchaseModal({
               {stockLabel(product)}
             </span>
           </div>
-          <p dir="auto" className="mt-2 text-[10px] text-white/40">
-            {product.name}
+          <p className="mt-2 text-[10px] text-white/40">
+            {persianBrandNames[product.brandKey] ?? translateProductText(product.brand)}
           </p>
           <div className="mt-4 flex items-center justify-between border-t border-white/[0.07] pt-3 text-xs">
             <span className="text-white/45">شناسه محصول</span>
@@ -1921,7 +2227,12 @@ function PurchaseModal({
           </div>
           <div className="mt-3 flex items-center justify-between text-xs">
             <span className="text-white/45">مبلغ به تومان</span>
-            <span className="font-bold text-primary">
+            <span className="flex items-center gap-2 font-bold text-primary">
+              {discount && (
+                <span className="text-[10px] text-white/35 line-through">
+                  {formatToman(discount.originalPriceToman)}
+                </span>
+              )}
               {formatToman(tomanPrice)}
             </span>
           </div>
@@ -1938,6 +2249,37 @@ function PurchaseModal({
             </div>
           )}
         </div>
+        <div className="mt-3 rounded-xl border border-amber-300/15 bg-amber-300/[0.035] p-3">
+          <label htmlFor="purchase-discount" className="text-[11px] font-semibold text-amber-100/85">
+            کد تخفیف دارید؟
+          </label>
+          <input
+            id="purchase-discount"
+            dir="ltr"
+            autoComplete="off"
+            maxLength={20}
+            value={discountInput}
+            onChange={(event) => handleDiscountInput(event.target.value)}
+            placeholder="PROMO10"
+            className="mt-2 w-full rounded-lg border border-white/10 bg-black/45 px-3 py-2.5 text-left text-xs text-white outline-none focus:border-amber-300/40"
+          />
+          <p
+            role={discountStatus === 'invalid' ? 'alert' : 'status'}
+            className={`mt-2 text-[10px] ${
+              discountStatus === 'valid'
+                ? 'text-emerald-200'
+                : discountStatus === 'invalid'
+                  ? 'text-red-200'
+                  : 'text-white/40'
+            }`}
+          >
+            {discountStatus === 'checking'
+              ? 'در حال بررسی کد…'
+              : discountStatus === 'valid' && discount
+                ? `کد اعمال شد؛ ${formatToman(discount.discountToman)} تخفیف`
+                : discountError}
+          </p>
+        </div>
         <div className="mt-3 rounded-xl border border-emerald-300/15 bg-emerald-300/[0.035] p-3">
           <p className="text-[11px] font-semibold text-emerald-100">
             روش تحویل این پلن
@@ -1945,9 +2287,15 @@ function PurchaseModal({
           <p className="mt-1.5 text-[10px] leading-6 text-white/60">
             {getPersianDeliveryDescription(product.name, product.description)}
           </p>
-          {product.description && (
+          <p className="mt-2 border-t border-white/[0.07] pt-2 text-[10px] leading-6 text-white/55">
+            {getPersianWarrantyDescription(product.name, product.description)}
+          </p>
+          <p className="mt-2 text-[10px] leading-6 text-white/50">
+            {getPersianLoginInstructions(product.name, product.description)}
+          </p>
+          {product.persianDescription && (
             <p className="mt-2 border-t border-white/[0.07] pt-2 text-[10px] leading-6 text-white/50">
-              {translateProductText(product.description)}
+              {product.persianDescription}
             </p>
           )}
         </div>
@@ -1988,9 +2336,11 @@ function PurchaseModal({
             <p className="mt-4 text-center text-[11px] leading-6 text-white/45">
               {product.status === 'unavailable'
                 ? 'این پلن در حال حاضر ناموجود است و امکان شروع خرید ندارد.'
-                : 'برای ادامه خرید، اطلاعات سفارش را برای ربات نوبول بفرستید.'}
+                : discountCode
+                  ? 'لینک این محصول همراه کد تخفیف از محدودیت تلگرام عبور می‌کند؛ کد را حذف کنید یا با پشتیبانی هماهنگ کنید.'
+                  : 'برای ادامه خرید، اطلاعات سفارش را برای ربات نوبول بفرستید.'}
             </p>
-            {product.status !== 'unavailable' && (
+            {product.status !== 'unavailable' && !discountCode && (
               <button
                 type="button"
                 onClick={() => onCopy(purchaseDetails)}

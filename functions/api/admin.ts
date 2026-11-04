@@ -1,9 +1,14 @@
-import { UserRegistryKV } from './_shared/broadcast'
+import {
+  sendCustomBroadcast,
+  type UserRegistryKV,
+} from './_shared/broadcast'
 import { callTelegram } from './_shared/telegram'
 import { decideStoredOrder, type OrderActionEnvironment } from './_shared/orderActions'
 import {
   DEFAULT_PROFIT_MARGIN_TIERS,
+  changeUserWallet,
   getEffectiveSettings,
+  getUserWallets,
   getProfitMarginPercent,
   listStoredCustomers,
   listStoredOrders,
@@ -14,8 +19,10 @@ import {
   providerRequestUrl,
   writeAdminSettings,
   type AdminSettings,
+  type PromoCode,
   type StoredCustomer,
   type StoredOrder,
+  type UserWallet,
 } from './_shared/settings'
 
 interface AdminEnvironment extends OrderActionEnvironment {
@@ -248,7 +255,7 @@ async function issueOtp(env: AdminEnvironment, key: string): Promise<void> {
   })
 }
 
-async function authenticate(
+export async function authenticateAdminRequest(
   request: Request,
   env: AdminEnvironment,
 ): Promise<boolean> {
@@ -369,8 +376,13 @@ function summarizeSales(orders: StoredOrder[], now = Date.now()) {
 }
 
 async function getLiveProducts(request: Request) {
-  const response = await fetch(new URL('/api/catalog', request.url), {
-    headers: { Accept: 'application/json' },
+  const catalogUrl = new URL('/api/catalog', request.url)
+  catalogUrl.searchParams.set('includeHidden', '1')
+  const response = await fetch(catalogUrl, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: request.headers.get('Authorization') ?? '',
+    },
     signal: AbortSignal.timeout(15000),
   })
   if (!response.ok) {
@@ -544,18 +556,33 @@ async function handleGet(request: Request, env: AdminEnvironment): Promise<Respo
       getLiveProducts(request),
       getDanteWallet(env),
     ])
-  const customers = await includeLegacySubscribers(env, storedCustomers)
+  const customersWithLegacy = await includeLegacySubscribers(env, storedCustomers)
+  const wallets = await getUserWallets(
+    env,
+    customersWithLegacy.map((customer) => customer.chatId),
+  )
+  const customers = customersWithLegacy.map((customer) => ({
+    ...customer,
+    wallet: wallets.get(customer.chatId),
+  }))
   const catalogProducts = catalog.products.map((item) => {
     const product = asRecord(item)
     const priceUsd = Number(product.price_usd)
     return {
       ...product,
-      appliedMarginPercent: getProfitMarginPercent(priceUsd, settings),
+      appliedMarginPercent: getProfitMarginPercent(
+        priceUsd,
+        settings,
+        typeof product.id === 'string' ? product.id : undefined,
+      ),
+      buyCostToman:
+        priceUsd * Number(product.usdt_rate_used ?? catalog.rate ?? settings.manualRate),
     }
   })
   return jsonResponse({
     orders,
     customers,
+    walletConfigured: Boolean(env.NOBULL_WALLET_DB),
     analytics: {
       ...summarizeSales(orders),
       totalBotSubscribers: subscriberCount,
@@ -567,6 +594,8 @@ async function handleGet(request: Request, env: AdminEnvironment): Promise<Respo
       cardNumber: settings.cardNumber ?? env.ADMIN_CARD_NUMBER ?? '',
       cardHolder: settings.cardHolder ?? env.ADMIN_CARD_HOLDER ?? '',
       profitMarginTiers: settings.profitMarginTiers,
+      productOverrides: settings.productOverrides ?? {},
+      discountCodes: settings.discountCodes ?? [],
       tiers: DEFAULT_PROFIT_MARGIN_TIERS,
       updatedAt: settings.updatedAt ?? null,
     },
@@ -632,7 +661,7 @@ export async function onRequestGet({
   if (!configuredSigningSecret(env)) {
     return jsonResponse({ error: 'Admin authentication is not configured.' }, 503)
   }
-  if (!(await authenticate(request, env))) {
+  if (!(await authenticateAdminRequest(request, env))) {
     return jsonResponse({ error: 'نشست ورود معتبر نیست یا منقضی شده است.' }, 401)
   }
   if (new URL(request.url).searchParams.get('resource') === 'balance') {
@@ -643,6 +672,50 @@ export async function onRequestGet({
   } catch (error) {
     console.error('Admin dashboard data request failed.', error)
     return jsonResponse({ error: 'دریافت اطلاعات پنل مدیریت ناموفق بود.' }, 500)
+  }
+}
+
+if (action === 'adjust-wallet') {
+  const chatId = typeof body.chatId === 'string' ? body.chatId : ''
+  const amountToman = body.amountToman
+  const reason =
+    typeof body.reason === 'string' && body.reason.trim()
+      ? body.reason.trim()
+      : 'تعدیل موجودی توسط مدیر'
+  if (
+    !/^\d{1,20}$/.test(chatId) ||
+    typeof amountToman !== 'number' ||
+    !Number.isSafeInteger(amountToman) ||
+    amountToman === 0 ||
+    Math.abs(amountToman) > 1_000_000_000 ||
+    reason.length > 200
+  ) {
+    return jsonResponse({ error: 'شناسه کاربر یا مبلغ تعدیل کیف پول معتبر نیست.' }, 400)
+  }
+  try {
+    const result = await changeUserWallet(
+      env,
+      chatId,
+      amountToman,
+      `admin:${crypto.randomUUID()}`,
+      reason,
+    )
+    if (result.status === 'insufficient') {
+      return jsonResponse({ error: 'موجودی کیف پول برای این کاهش کافی نیست.' }, 409)
+    }
+    return jsonResponse({ ok: true, wallet: result.wallet })
+  } catch (error) {
+    console.error('Admin wallet adjustment failed.', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return jsonResponse(
+      {
+        error: env.NOBULL_WALLET_DB
+          ? 'تعدیل کیف پول انجام نشد.'
+          : 'پایگاه داده کیف پول پیکربندی نشده است.',
+      },
+      env.NOBULL_WALLET_DB ? 500 : 503,
+    )
   }
 }
 
@@ -674,10 +747,7 @@ export async function onRequestPost({
       return jsonResponse({ ok: true, message: 'کد ورود به تلگرام مدیر ارسال شد.' })
     } catch (error) {
       console.error('Admin Telegram OTP could not be issued.', error)
-      return jsonResponse(
-        { error: error instanceof Error ? error.message : 'ارسال کد ورود ناموفق بود.' },
-        503,
-      )
+      return jsonResponse({ error: 'ارسال کد ورود ناموفق بود.' }, 503)
     }
   }
 
@@ -728,7 +798,7 @@ export async function onRequestPost({
     return jsonResponse({ token, expiresIn: SESSION_TTL_SECONDS })
   }
 
-  if (!(await authenticate(request, env))) {
+  if (!(await authenticateAdminRequest(request, env))) {
     return jsonResponse({ error: 'نشست ورود معتبر نیست یا منقضی شده است.' }, 401)
   }
 
@@ -749,6 +819,205 @@ export async function onRequestPost({
     }
   }
 
+  if (
+    action === 'save-product-override' ||
+    action === 'reset-product-pricing' ||
+    action === 'set-product-flag'
+  ) {
+    const productId = typeof body.productId === 'string' ? body.productId : ''
+    if (!/^[a-z0-9-]{1,16}--[a-zA-Z0-9_-]{1,60}$/i.test(productId)) {
+      return jsonResponse({ error: 'شناسه محصول معتبر نیست.' }, 400)
+    }
+
+    const stored = await readAdminSettings(env)
+    const overrides = { ...(stored.productOverrides ?? {}) }
+    const override = { ...(overrides[productId] ?? {}) }
+
+    if (action === 'reset-product-pricing') {
+      delete override.customMarginPercent
+      delete override.customPriceToman
+    } else if (action === 'set-product-flag') {
+      if (
+        (body.flag !== 'featured' && body.flag !== 'hidden') ||
+        typeof body.value !== 'boolean'
+      ) {
+        return jsonResponse({ error: 'تنظیم نمایان‌بودن یا پیشنهاد ویژه معتبر نیست.' }, 400)
+      }
+      override[body.flag] = body.value
+    } else {
+      const customMarginPercent = body.customMarginPercent
+      const customPriceToman = body.customPriceToman
+      const hasMargin = Object.hasOwn(body, 'customMarginPercent')
+      const hasPrice = Object.hasOwn(body, 'customPriceToman')
+      if (!hasMargin && !hasPrice) {
+        return jsonResponse({ error: 'درصد سود یا قیمت فروش معتبر نیست.' }, 400)
+      }
+      if (hasMargin) {
+        if (
+          typeof customMarginPercent !== 'number' ||
+          !Number.isFinite(customMarginPercent) ||
+          customMarginPercent < 0 ||
+          customMarginPercent > 1000
+        ) {
+          return jsonResponse({ error: 'درصد سود یا قیمت فروش معتبر نیست.' }, 400)
+        }
+        override.customMarginPercent = customMarginPercent
+      }
+      if (hasPrice) {
+        if (
+          typeof customPriceToman !== 'number' ||
+          !Number.isFinite(customPriceToman) ||
+          customPriceToman < 1000 ||
+          customPriceToman > 1_000_000_000
+        ) {
+          return jsonResponse({ error: 'درصد سود یا قیمت فروش معتبر نیست.' }, 400)
+        }
+        override.customPriceToman = customPriceToman
+      }
+    }
+
+    if (Object.keys(override).length) overrides[productId] = override
+    else delete overrides[productId]
+
+    try {
+      await writeAdminSettings(env, { ...stored, productOverrides: overrides })
+      return jsonResponse({ ok: true })
+    } catch (error) {
+      console.error('Admin product pricing override could not be saved.', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      return jsonResponse({ error: 'ذخیره تنظیم محصول ناموفق بود.' }, 500)
+    }
+  }
+
+  if (action === 'save-discount') {
+    const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : ''
+    const type: PromoCode['type'] | null =
+      body.type === 'percent' || body.type === 'fixed_toman'
+        ? body.type
+        : null
+    const value = body.value
+    const maxUses = body.maxUses
+    const active = body.active
+    const expiresAt = typeof body.expiresAt === 'string' ? body.expiresAt.trim() : ''
+    const description =
+      typeof body.description === 'string' ? body.description.trim() : ''
+    if (
+      !/^[A-Z0-9_-]{2,20}$/.test(code) ||
+      type === null ||
+      typeof value !== 'number' ||
+      !Number.isFinite(value) ||
+      value <= 0 ||
+      (type === 'percent' && value > 100) ||
+      value > 1_000_000_000 ||
+      typeof maxUses !== 'number' ||
+      !Number.isInteger(maxUses) ||
+      maxUses < 1 ||
+      maxUses > 1_000_000 ||
+      typeof active !== 'boolean' ||
+      (expiresAt !== '' && !Number.isFinite(Date.parse(expiresAt))) ||
+      description.length > 120
+    ) {
+      return jsonResponse({ error: 'اطلاعات کد تخفیف معتبر نیست.' }, 400)
+    }
+    try {
+      const stored = await readAdminSettings(env)
+      const codes = [...(stored.discountCodes ?? [])]
+      const existingIndex = codes.findIndex(
+        (item) => item.code.toUpperCase() === code,
+      )
+      const usedCount = existingIndex >= 0 ? codes[existingIndex].usedCount : 0
+      if (maxUses < usedCount) {
+        return jsonResponse(
+          { error: 'سقف استفاده نمی‌تواند کمتر از تعداد مصرف‌شده باشد.' },
+          400,
+        )
+      }
+      const updated = {
+        code,
+        type,
+        value,
+        maxUses,
+        usedCount,
+        active,
+        ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
+        ...(description ? { description } : {}),
+      }
+      if (existingIndex >= 0) codes[existingIndex] = updated
+      else codes.push(updated)
+      await writeAdminSettings(env, { ...stored, discountCodes: codes })
+      return jsonResponse({ ok: true, discountCode: updated })
+    } catch (error) {
+      console.error('Admin discount code could not be saved.', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      return jsonResponse({ error: 'ذخیره کد تخفیف ناموفق بود.' }, 500)
+    }
+  }
+
+  if (action === 'delete-discount') {
+    const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : ''
+    if (!/^[A-Z0-9_-]{2,20}$/.test(code)) {
+      return jsonResponse({ error: 'کد تخفیف معتبر نیست.' }, 400)
+    }
+    try {
+      const stored = await readAdminSettings(env)
+      const discountCodes = (stored.discountCodes ?? []).filter(
+        (item) => item.code.toUpperCase() !== code,
+      )
+      await writeAdminSettings(env, { ...stored, discountCodes })
+      return jsonResponse({ ok: true })
+    } catch (error) {
+      console.error('Admin discount code could not be deleted.', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      return jsonResponse({ error: 'حذف کد تخفیف ناموفق بود.' }, 500)
+    }
+  }
+
+  if (action === 'send_broadcast') {
+    const message = typeof body.message === 'string' ? body.message.trim() : ''
+    const audience = body.audience
+    const buttonText =
+      typeof body.buttonText === 'string' ? body.buttonText.trim() : ''
+    const buttonUrl =
+      typeof body.buttonUrl === 'string' ? body.buttonUrl.trim() : ''
+    let button: { text: string; url: string } | undefined
+    if (
+      !message ||
+      message.length > 4096 ||
+      (audience !== 'all' && audience !== 'buyers') ||
+      (Boolean(buttonText) !== Boolean(buttonUrl)) ||
+      buttonText.length > 64
+    ) {
+      return jsonResponse({ error: 'متن، مخاطبان یا دکمه پیام معتبر نیست.' }, 400)
+    }
+    if (buttonText) {
+      try {
+        const url = new URL(buttonUrl)
+        if (url.protocol !== 'https:' || url.username || url.password) {
+          return jsonResponse({ error: 'لینک دکمه باید یک نشانی HTTPS معتبر باشد.' }, 400)
+        }
+        button = { text: buttonText, url: url.toString() }
+      } catch {
+        return jsonResponse({ error: 'لینک دکمه معتبر نیست.' }, 400)
+      }
+    }
+    try {
+      const result = await sendCustomBroadcast(env, {
+        message,
+        audience,
+        ...(button ? { button } : {}),
+      })
+      return jsonResponse(result)
+    } catch (error) {
+      console.error('Admin custom broadcast could not be sent.', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      return jsonResponse({ error: 'ارسال پیام همگانی ناموفق بود.' }, 500)
+    }
+  }
+
   if (action === 'decide-order') {
     const orderId = typeof body.orderId === 'string' ? body.orderId : ''
     const decision = body.decision
@@ -761,12 +1030,18 @@ export async function onRequestPost({
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'تصمیم‌گیری برای سفارش ناموفق بود.'
-      const status = /not found/i.test(message)
-        ? 404
-        : /no longer pending/i.test(message)
-          ? 409
-          : 502
-      return jsonResponse({ error: message }, status)
+      const notFound = /not found/i.test(message)
+      const conflict = /no longer pending|not a private user/i.test(message)
+      return jsonResponse(
+        {
+          error: notFound
+            ? 'سفارش پیدا نشد.'
+            : conflict
+              ? 'سفارش دیگر در وضعیت قابل‌بررسی نیست.'
+              : 'عملیات سفارش ناموفق بود؛ وضعیت تأمین‌کننده را بررسی کنید.',
+        },
+        notFound ? 404 : conflict ? 409 : 502,
+      )
     }
   }
 
