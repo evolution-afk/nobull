@@ -1,0 +1,8 @@
+name = "nobull"
+compatibility_date = "2026-11-01"
+account_id = "6e7f6be0c8ffa905682d024772487262"
+
+[[d1_databases]]
+binding = "NOBULL_WALLET_DB"
+database_name = "nobull-wallet-db"
+database_id = "9d1f1dd3-2362-477a-9108-e97f706d4373"
