@@ -43,7 +43,17 @@ export interface UserWallet {
 export type WalletChangeResult =
   | { status: 'updated'; wallet: UserWallet }
   | { status: 'insufficient'; wallet: UserWallet }
+  | { status: 'discount_unavailable'; wallet: UserWallet }
   | { status: 'duplicate'; wallet: UserWallet }
+
+export interface TelegramDiscount {
+  code: string
+  discount_percent: number
+  max_usage: number
+  used_count: number
+  is_active: number
+  expires_at: string | null
+}
 
 export interface EncryptedDelivery {
   iv: string
@@ -144,6 +154,8 @@ export interface StoredOrder {
   estimatedProfitToman: number
   discountCode?: string
   discountToman?: number
+  discountPercent?: number
+  originalPriceToman?: number
   reference: string
   completedAt?: number
 }
@@ -322,6 +334,7 @@ export async function recordWalletPurchase(
   chatId: string | number,
   amountToman: number,
   orderId: string,
+  discountCode?: string,
 ): Promise<WalletChangeResult> {
   const database = env.NOBULL_WALLET_DB
   if (!database) {
@@ -337,6 +350,7 @@ export async function recordWalletPurchase(
   }
   const id = String(chatId)
   const now = Date.now()
+  const normalizedDiscountCode = discountCode?.toUpperCase() ?? ''
   try {
     const results = await database.batch([
       database
@@ -346,9 +360,25 @@ export async function recordWalletPurchase(
                total_spent_toman = total_spent_toman + ?,
                orders_count = orders_count + 1,
                updated_at = ?
-           WHERE chat_id = ? AND balance_toman >= ?`,
+           WHERE chat_id = ? AND balance_toman >= ?
+             AND (
+               ? = '' OR EXISTS (
+                 SELECT 1 FROM nobull_discount_reservations
+                 WHERE code = ? AND order_id = ? AND expires_at > ?
+               )
+             )`,
         )
-        .bind(amountToman, amountToman, now, id, amountToman),
+        .bind(
+          amountToman,
+          amountToman,
+          now,
+          id,
+          amountToman,
+          normalizedDiscountCode,
+          normalizedDiscountCode,
+          orderId,
+          new Date(now).toISOString(),
+        ),
       database
         .prepare(
           `INSERT INTO nobull_wallet_transactions
@@ -356,9 +386,60 @@ export async function recordWalletPurchase(
            SELECT ?, ?, ?, 'purchase', ? WHERE changes() = 1`,
         )
         .bind(id, -amountToman, `purchase:${orderId}`, now),
+      database
+        .prepare(
+          `INSERT INTO nobull_discount_redemptions (code, order_id, created_at)
+           SELECT ?, ?, ? WHERE ? != '' AND changes() = 1
+             AND EXISTS (
+               SELECT 1 FROM nobull_discount_reservations
+               WHERE code = ? AND order_id = ?
+             )`,
+        )
+        .bind(
+          normalizedDiscountCode,
+          orderId,
+          now,
+          normalizedDiscountCode,
+          normalizedDiscountCode,
+          orderId,
+        ),
+      database
+        .prepare(
+          `UPDATE nobull_discounts SET used_count = used_count + 1
+           WHERE code = ? AND changes() = 1`,
+        )
+        .bind(normalizedDiscountCode),
+      database
+        .prepare(
+          `DELETE FROM nobull_discount_reservations
+           WHERE code = ? AND order_id = ? AND changes() = 1`,
+        )
+        .bind(normalizedDiscountCode, orderId),
     ])
     if ((results[0]?.meta.changes ?? 0) !== 1) {
+      if (
+        normalizedDiscountCode &&
+        !(await database
+          .prepare(
+            `SELECT order_id FROM nobull_discount_reservations
+             WHERE code = ? AND order_id = ? AND expires_at > ?`,
+          )
+          .bind(
+            normalizedDiscountCode,
+            orderId,
+            new Date(now).toISOString(),
+          )
+          .first<{ order_id: string }>())
+      ) {
+        return {
+          status: 'discount_unavailable',
+          wallet: await getUserWallet(env, id),
+        }
+      }
       return { status: 'insufficient', wallet: await getUserWallet(env, id) }
+    }
+    if (normalizedDiscountCode) {
+      await syncPromoUsageCount(env, normalizedDiscountCode)
     }
     return { status: 'updated', wallet: await getUserWallet(env, id) }
   } catch (error) {
@@ -685,6 +766,364 @@ export function applyDiscountToPrice(
       ? Math.round((priceToman * discount.value) / 100)
       : Math.round(discount.value)
   return Math.max(0, priceToman - discountToman)
+}
+
+export async function getTelegramDiscount(
+  env: BackendEnvironment,
+  code: string,
+  orderId = '',
+): Promise<TelegramDiscount | null> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  if (!/^[A-Za-z0-9_-]{2,20}$/.test(code)) return null
+  const normalizedCode = code.toUpperCase()
+  let discount = await database
+    .prepare(
+      `SELECT code, discount_percent, max_usage, used_count, is_active, expires_at
+       FROM nobull_discounts WHERE code = ?`,
+    )
+    .bind(normalizedCode)
+    .first<TelegramDiscount>()
+  if (!discount) {
+    const legacy = (await readAdminSettings(env)).discountCodes?.find(
+      (candidate) => candidate.code.toUpperCase() === normalizedCode,
+    )
+    if (
+      legacy?.type === 'percent' &&
+      Number.isInteger(legacy.value) &&
+      legacy.value >= 1 &&
+      legacy.value <= 100 &&
+      Number.isInteger(legacy.maxUses) &&
+      legacy.maxUses >= 1
+    ) {
+      await syncTelegramDiscount(env, {
+        code: legacy.code,
+        discountPercent: legacy.value,
+        maxUsage: legacy.maxUses,
+        isActive: legacy.active,
+        initialUsedCount:
+          Number.isInteger(legacy.usedCount) && legacy.usedCount >= 0
+            ? legacy.usedCount
+            : 0,
+        ...(legacy.expiresAt ? { expiresAt: legacy.expiresAt } : {}),
+      })
+      discount = await database
+        .prepare(
+          `SELECT code, discount_percent, max_usage, used_count, is_active, expires_at
+           FROM nobull_discounts WHERE code = ?`,
+        )
+        .bind(normalizedCode)
+        .first<TelegramDiscount>()
+    }
+  }
+  if (
+    !discount ||
+    discount.is_active !== 1 ||
+    discount.used_count >= discount.max_usage ||
+    (discount.expires_at !== null &&
+      discount.expires_at <= new Date().toISOString())
+  ) {
+    return null
+  }
+  const reservedCount = await database
+    .prepare(
+      `SELECT COUNT(*) AS count FROM nobull_discount_reservations
+       WHERE code = ? AND expires_at > ? AND order_id != ?`,
+    )
+    .bind(
+      normalizedCode,
+      new Date().toISOString(),
+      orderId,
+    )
+    .first<{ count: number }>()
+  if (discount.used_count + Number(reservedCount?.count ?? 0) >= discount.max_usage) {
+    return null
+  }
+  return discount
+}
+
+export async function reserveTelegramDiscount(
+  env: BackendEnvironment,
+  code: string,
+  orderId: string,
+): Promise<boolean> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  const now = new Date()
+  const nowIso = now.toISOString()
+  const expiresAt = new Date(
+    now.getTime() + 7 * 24 * 60 * 60 * 1000,
+  ).toISOString()
+  const results = await database.batch([
+    database
+      .prepare('DELETE FROM nobull_discount_reservations WHERE expires_at <= ?')
+      .bind(nowIso),
+    database
+      .prepare(
+        `INSERT INTO nobull_discount_reservations (code, order_id, expires_at)
+         SELECT ?, ?, ? WHERE EXISTS (
+           SELECT 1 FROM nobull_discounts
+           WHERE code = ? AND is_active = 1 AND used_count < max_usage
+             AND (expires_at IS NULL OR expires_at > ?)
+             AND used_count + (
+               SELECT COUNT(*) FROM nobull_discount_reservations
+               WHERE code = nobull_discounts.code AND expires_at > ?
+                 AND order_id != ?
+             ) < max_usage
+         )
+         ON CONFLICT(order_id) DO UPDATE SET
+           code = excluded.code, expires_at = excluded.expires_at`,
+      )
+      .bind(
+        code.toUpperCase(),
+        orderId,
+        expiresAt,
+        code.toUpperCase(),
+        nowIso,
+        nowIso,
+        orderId,
+      ),
+  ])
+  return (results[1]?.meta.changes ?? 0) === 1
+}
+
+export async function syncTelegramDiscount(
+  env: BackendEnvironment,
+  discount: {
+    code: string
+    discountPercent: number
+    maxUsage: number
+    isActive: boolean
+    expiresAt?: string
+    initialUsedCount?: number
+  },
+): Promise<number> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  const existing = await database
+    .prepare(
+      `SELECT used_count,
+         (SELECT COUNT(*) FROM nobull_discount_reservations
+          WHERE code = nobull_discounts.code AND expires_at > ?) AS reserved_count
+       FROM nobull_discounts WHERE code = ?`,
+    )
+    .bind(new Date().toISOString(), discount.code.toUpperCase())
+    .first<{ used_count: number; reserved_count: number }>()
+  const usedCount = Number(existing?.used_count ?? 0)
+  const initialUsedCount = existing
+    ? usedCount
+    : Number(discount.initialUsedCount ?? 0)
+  if (
+    discount.maxUsage <
+    initialUsedCount + Number(existing?.reserved_count ?? 0)
+  ) {
+    throw new Error('Discount max usage cannot be less than its used count.')
+  }
+  await database
+    .prepare(
+      `INSERT INTO nobull_discounts
+       (code, discount_percent, max_usage, used_count, is_active, expires_at)
+       VALUES (?, ?, ?, ?, ?, NULLIF(?, ''))
+       ON CONFLICT(code) DO UPDATE SET
+         discount_percent = excluded.discount_percent,
+         max_usage = excluded.max_usage,
+         is_active = excluded.is_active,
+         expires_at = excluded.expires_at`,
+    )
+    .bind(
+      discount.code.toUpperCase(),
+      discount.discountPercent,
+      discount.maxUsage,
+      initialUsedCount,
+      discount.isActive ? 1 : 0,
+      discount.expiresAt ?? '',
+    )
+    .run()
+  return usedCount
+}
+
+export async function getTelegramDiscountUsage(
+  env: BackendEnvironment,
+): Promise<Map<string, number>> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) return new Map()
+  const rows = await database
+    .prepare('SELECT code, used_count FROM nobull_discounts')
+    .all<{ code: string; used_count: number }>()
+  return new Map(
+    rows.results.map((row) => [row.code.toUpperCase(), Number(row.used_count)]),
+  )
+}
+
+export async function disableTelegramDiscount(
+  env: BackendEnvironment,
+  code: string,
+): Promise<void> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) return
+  await database
+    .prepare('UPDATE nobull_discounts SET is_active = 0 WHERE code = ?')
+    .bind(code.toUpperCase())
+    .run()
+}
+
+export async function redeemTelegramDiscount(
+  env: BackendEnvironment,
+  code: string,
+  orderId: string,
+): Promise<boolean> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  const existing = await database
+    .prepare(
+      'SELECT code FROM nobull_discount_redemptions WHERE order_id = ?',
+    )
+    .bind(orderId)
+    .first<{ code: string }>()
+  if (existing) return existing.code.toUpperCase() === code.toUpperCase()
+
+  const now = Date.now()
+  const results = await database.batch([
+    database
+      .prepare(
+        `INSERT INTO nobull_discount_redemptions (code, order_id, created_at)
+         SELECT ?, ?, ? WHERE EXISTS (
+           SELECT 1 FROM nobull_discounts
+           WHERE code = ? AND used_count < max_usage
+         ) AND EXISTS (
+           SELECT 1 FROM nobull_discount_reservations
+           WHERE code = ? AND order_id = ? AND expires_at > ?
+         ) AND NOT EXISTS (
+           SELECT 1 FROM nobull_discount_redemptions WHERE order_id = ?
+         )`,
+      )
+      .bind(
+        code.toUpperCase(),
+        orderId,
+        now,
+        code.toUpperCase(),
+        code.toUpperCase(),
+        orderId,
+        new Date(now).toISOString(),
+        orderId,
+      ),
+    database
+      .prepare(
+        `UPDATE nobull_discounts SET used_count = used_count + 1
+         WHERE code = ? AND changes() = 1`,
+      )
+      .bind(code.toUpperCase()),
+    database
+      .prepare(
+        `DELETE FROM nobull_discount_reservations
+         WHERE order_id = ? AND changes() = 1`,
+      )
+      .bind(orderId),
+  ])
+  if ((results[0]?.meta.changes ?? 0) === 1) {
+    await syncPromoUsageCount(env, code)
+    return true
+  }
+  const redemption = await database
+    .prepare(
+      'SELECT order_id FROM nobull_discount_redemptions WHERE order_id = ?',
+    )
+    .bind(orderId)
+    .first<{ order_id: string }>()
+  return redemption?.order_id === orderId
+}
+
+export async function recordLegacyTelegramDiscountRedemption(
+  env: BackendEnvironment,
+  code: string,
+  orderId: string,
+): Promise<boolean> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) {
+    throw new Error('NOBULL_WALLET_DB D1 binding is not configured.')
+  }
+  const existing = await database
+    .prepare('SELECT code FROM nobull_discount_redemptions WHERE order_id = ?')
+    .bind(orderId)
+    .first<{ code: string }>()
+  if (existing) return existing.code.toUpperCase() === code.toUpperCase()
+
+  const legacy = (await readAdminSettings(env)).discountCodes?.find(
+    (discount) => discount.code.toUpperCase() === code.toUpperCase(),
+  )
+  if (
+    legacy?.type === 'percent' &&
+    Number.isInteger(legacy.value) &&
+    legacy.value >= 1 &&
+    legacy.value <= 100
+  ) {
+    await syncTelegramDiscount(env, {
+      code: legacy.code,
+      discountPercent: legacy.value,
+      maxUsage: legacy.maxUses,
+      isActive: legacy.active,
+      initialUsedCount:
+        Number.isInteger(legacy.usedCount) && legacy.usedCount >= 0
+          ? legacy.usedCount
+          : 0,
+      ...(legacy.expiresAt ? { expiresAt: legacy.expiresAt } : {}),
+    })
+  }
+  await database
+    .prepare(
+      `INSERT OR IGNORE INTO nobull_discount_redemptions (code, order_id, created_at)
+       SELECT ?, ?, ? WHERE EXISTS (
+         SELECT 1 FROM nobull_discounts WHERE code = ?
+       )`,
+    )
+    .bind(code.toUpperCase(), orderId, Date.now(), code.toUpperCase())
+    .run()
+  const redemption = await database
+    .prepare('SELECT code FROM nobull_discount_redemptions WHERE order_id = ?')
+    .bind(orderId)
+    .first<{ code: string }>()
+  return redemption?.code.toUpperCase() === code.toUpperCase()
+}
+
+export async function releaseTelegramDiscountReservation(
+  env: BackendEnvironment,
+  orderId: string,
+): Promise<void> {
+  const database = env.NOBULL_WALLET_DB
+  if (!database) return
+  await database
+    .prepare('DELETE FROM nobull_discount_reservations WHERE order_id = ?')
+    .bind(orderId)
+    .run()
+}
+
+async function syncPromoUsageCount(
+  env: BackendEnvironment,
+  code: string,
+): Promise<void> {
+  if (!env.NOBULL_SETTINGS) return
+  try {
+    const settings = await readAdminSettings(env)
+    const discountCodes = (settings.discountCodes ?? []).map((discount) =>
+      discount.code.toUpperCase() === code.toUpperCase()
+        ? { ...discount, usedCount: discount.usedCount + 1 }
+        : discount,
+    )
+    await writeAdminSettings(env, { ...settings, discountCodes })
+  } catch (error) {
+    console.error('Discount usage could not be synchronized to admin settings.', {
+      code,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
 }
 
 function isProviderConfig(value: unknown): value is ProviderConfig {

@@ -8,6 +8,7 @@ import {
   DEFAULT_PROFIT_MARGIN_TIERS,
   changeUserWallet,
   getEffectiveSettings,
+  getTelegramDiscountUsage,
   getUserWallets,
   getProfitMarginPercent,
   listStoredCustomers,
@@ -18,6 +19,8 @@ import {
   providerHeaders,
   providerRequestUrl,
   writeAdminSettings,
+  disableTelegramDiscount,
+  syncTelegramDiscount,
   type AdminSettings,
   type PromoCode,
   type StoredCustomer,
@@ -578,6 +581,7 @@ async function handleGet(request: Request, env: AdminEnvironment): Promise<Respo
         priceUsd * Number(product.usdt_rate_used ?? catalog.rate ?? settings.manualRate),
     }
   })
+  const discountUsage = await getTelegramDiscountUsage(env)
   return jsonResponse({
     orders,
     customers,
@@ -594,7 +598,11 @@ async function handleGet(request: Request, env: AdminEnvironment): Promise<Respo
       cardHolder: settings.cardHolder ?? env.ADMIN_CARD_HOLDER ?? '',
       profitMarginTiers: settings.profitMarginTiers,
       productOverrides: settings.productOverrides ?? {},
-      discountCodes: settings.discountCodes ?? [],
+      discountCodes: (settings.discountCodes ?? []).map((discount) => ({
+        ...discount,
+        usedCount:
+          discountUsage.get(discount.code.toUpperCase()) ?? discount.usedCount,
+      })),
       tiers: DEFAULT_PROFIT_MARGIN_TIERS,
       updatedAt: settings.updatedAt ?? null,
     },
@@ -907,7 +915,7 @@ export async function onRequestPost({
       typeof value !== 'number' ||
       !Number.isFinite(value) ||
       value <= 0 ||
-      (type === 'percent' && value > 100) ||
+      (type === 'percent' && (value > 100 || !Number.isInteger(value))) ||
       value > 1_000_000_000 ||
       typeof maxUses !== 'number' ||
       !Number.isInteger(maxUses) ||
@@ -932,7 +940,7 @@ export async function onRequestPost({
           400,
         )
       }
-      const updated = {
+      let updated = {
         code,
         type,
         value,
@@ -941,6 +949,23 @@ export async function onRequestPost({
         active,
         ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
         ...(description ? { description } : {}),
+      }
+      if (env.NOBULL_WALLET_DB) {
+        if (type === 'percent') {
+          const usedCount = await syncTelegramDiscount(env, {
+            code,
+            discountPercent: value,
+            maxUsage: maxUses,
+            isActive: active,
+            initialUsedCount: usedCount,
+            ...(expiresAt
+              ? { expiresAt: new Date(expiresAt).toISOString() }
+              : {}),
+          })
+          updated = { ...updated, usedCount }
+        } else {
+          await disableTelegramDiscount(env, code)
+        }
       }
       if (existingIndex >= 0) codes[existingIndex] = updated
       else codes.push(updated)
@@ -964,6 +989,7 @@ export async function onRequestPost({
       const discountCodes = (stored.discountCodes ?? []).filter(
         (item) => item.code.toUpperCase() !== code,
       )
+      await disableTelegramDiscount(env, code)
       await writeAdminSettings(env, { ...stored, discountCodes })
       return jsonResponse({ ok: true })
     } catch (error) {

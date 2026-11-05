@@ -5,6 +5,9 @@ import {
   getProviderKey,
   providerHeaders,
   providerRequestUrl,
+  recordLegacyTelegramDiscountRedemption,
+  releaseTelegramDiscountReservation,
+  redeemTelegramDiscount,
   saveOrder,
   upsertCustomer,
   type BackendEnvironment,
@@ -65,7 +68,26 @@ export async function decideStoredOrder(
     throw new Error('Order is no longer pending review.')
   }
 
+  if (action === 'approve' && order.discountCode) {
+    const legacyDiscount =
+      order.discountPercent === undefined &&
+      order.originalPriceToman === undefined
+    const redeemed = legacyDiscount
+      ? await recordLegacyTelegramDiscountRedemption(
+          env,
+          order.discountCode,
+          order.orderId,
+        )
+      : await redeemTelegramDiscount(env, order.discountCode, order.orderId)
+    if (!redeemed) {
+      throw new Error('Discount usage limit was reached before payment approval.')
+    }
+  }
+
   if (action === 'reject') {
+    if (order.discountCode) {
+      await releaseTelegramDiscountReservation(env, order.orderId)
+    }
     const rejected: StoredOrder = {
       ...order,
       status: 'rejected',

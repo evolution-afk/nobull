@@ -9,9 +9,8 @@ import {
   type TelegramEnvironment as BaseTelegramEnvironment,
 } from './_shared/telegram'
 import {
-  applyDiscountToPrice,
   DEFAULT_PROFIT_MARGIN_TIERS,
-  findActiveDiscountCode,
+  getTelegramDiscount,
   getUserWallet,
   getEffectiveSettings,
   calculateProductPriceToman,
@@ -20,6 +19,8 @@ import {
   providerHeaders,
   providerRequestUrl,
   readAdminSettings,
+  releaseTelegramDiscountReservation,
+  reserveTelegramDiscount,
   recordWalletPurchase,
   getProfitMarginPercent,
   listStoredOrders,
@@ -115,6 +116,11 @@ interface ReceiptContext {
   reference: string
   orderId?: string
   status?: 'pending' | 'processing'
+}
+
+interface DiscountEntryContext {
+  orderId: string
+  userId: string
 }
 
 interface ProductFilters {
@@ -550,6 +556,76 @@ async function findPurchaseProduct(
   return null
 }
 
+function discountEntryKey(chatId: string | number): string {
+  return `nobull:discount-entry:${chatId}`
+}
+
+async function sendCheckoutInvoice(
+  env: TelegramEnvironment,
+  request: Request,
+  chatId: string | number,
+  order: StoredOrder,
+  cardNumber: string,
+  cardHolder: string,
+  walletAvailable: boolean,
+): Promise<void> {
+  const format = (amount: number) => new Intl.NumberFormat('fa-IR').format(amount)
+  const originalPriceToman =
+    order.originalPriceToman ??
+    order.priceToman + (order.discountToman ?? 0)
+  const invoice = [
+    '🧾 فاکتور خرید نوبول',
+    '',
+    `محصول: ${order.productTitle}`,
+    `تأمین‌کننده: ${translateProductText(order.provider)}`,
+    `شناسه محصول: ${order.productId}`,
+    `روش تحویل: ${getPersianDeliveryDescription(order.productWarrantySource ?? '', order.productDescription ?? '')}`,
+    getPersianWarrantyDescription(
+      order.productWarrantySource,
+      order.productDescription,
+    ),
+    getPersianLoginInstructions(
+      order.productWarrantySource,
+      order.productDescription,
+    ),
+    '',
+    `قیمت اصلی: ${format(originalPriceToman)} تومان`,
+    ...(order.discountCode
+      ? [
+          `تخفیف کد ${order.discountCode} (${format(order.discountPercent ?? 0)}٪): -${format(order.discountToman ?? 0)} تومان`,
+        ]
+      : []),
+    `مبلغ نهایی: ${format(order.priceToman)} تومان`,
+    ...(cardNumber && cardHolder
+      ? [
+          '',
+          `شماره کارت: ${cardNumber}`,
+          `به نام: ${cardHolder}`,
+          '',
+          `پس از پرداخت، تصویر رسید را با کپشن buy_${order.provider}__${order.productId} ارسال کنید یا در پاسخ به همین فاکتور بفرستید.`,
+        ]
+      : []),
+  ].join('\n')
+  const keyboard: { text: string; callback_data?: string; web_app?: { url: string } }[][] = [
+    [{ text: '🎟 اعمال کد تخفیف', callback_data: `discount:apply:${order.orderId}` }],
+  ]
+  if (walletAvailable) {
+    keyboard.push([
+      {
+        text: 'پرداخت از کیف پول',
+        callback_data: `wallet:pay:${order.orderId}`,
+      },
+    ])
+  }
+  keyboard.push([
+    {
+      text: 'مشاهده فروشگاه NoBull',
+      web_app: { url: new URL('/', request.url).toString() },
+    },
+  ])
+  await sendMessage(env, chatId, invoice, { inline_keyboard: keyboard })
+}
+
 async function startPurchase(
   request: Request,
   env: TelegramEnvironment,
@@ -592,6 +668,9 @@ async function startPurchase(
   const productKey = String(
     product.id ?? `${product.provider_id ?? 'dante'}--${id}`,
   )
+  const orderId = updateId === undefined
+    ? crypto.randomUUID()
+    : await telegramOrderId(updateId, message.chat.id, productKey)
   const originalPriceToman = calculateProductPriceToman(
     usdPrice,
     rate,
@@ -599,7 +678,7 @@ async function startPurchase(
     productKey,
   )
   const discount = discountCode
-    ? findActiveDiscountCode(stored.discountCodes, discountCode)
+    ? await getTelegramDiscount(env, discountCode, orderId)
     : null
   if (discountCode && !discount) {
     await sendMessage(
@@ -609,18 +688,15 @@ async function startPurchase(
     )
     return
   }
-  const priceToman = discount
-    ? applyDiscountToPrice(originalPriceToman, discount)
-    : originalPriceToman
-  const discountToman = originalPriceToman - priceToman
+  const discountToman = discount
+    ? Math.round((originalPriceToman * discount.discount_percent) / 100)
+    : 0
+  const priceToman = Math.max(0, originalPriceToman - discountToman)
   const appliedMarginPercent = getProfitMarginPercent(
     usdPrice,
     settings,
     productKey,
   )
-  const orderId = updateId === undefined
-    ? crypto.randomUUID()
-    : await telegramOrderId(updateId, message.chat.id, productKey)
   const existingOrder = updateId === undefined
     ? null
     : (await listStoredOrders(env)).find((candidate) => candidate.orderId === orderId)
@@ -651,6 +727,35 @@ async function startPurchase(
       return
     }
   }
+  const hasCardDetails = Boolean(
+    cardNumber &&
+      cardHolder &&
+      !/X{2,}/i.test(cardNumber) &&
+      cardHolder !== 'نام صاحب کارت',
+  )
+  if (!hasCardDetails && walletBalanceToman < priceToman) {
+    await sendMessage(
+      env,
+      message.chat.id,
+      'پرداخت این محصول در حال حاضر پیکربندی نشده است. لطفاً کمی بعد دوباره تلاش کنید.',
+    )
+    return
+  }
+  if (discount) {
+    const reserved = await reserveTelegramDiscount(
+      env,
+      discount.code,
+      orderId,
+    )
+    if (!reserved) {
+      await sendMessage(
+        env,
+        message.chat.id,
+        'ظرفیت این کد تخفیف در همین لحظه تکمیل شد. لطفاً کد دیگری انتخاب کنید.',
+      )
+      return
+    }
+  }
   const reference = `tg-${message.chat.id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
   const order: StoredOrder = {
     orderId,
@@ -671,24 +776,26 @@ async function startPurchase(
     priceUsd: usdPrice,
     usdtRate: rate,
     appliedMarginPercent,
+    originalPriceToman,
     priceToman,
     estimatedProfitToman:
       priceToman - Math.round(usdPrice * rate) - settings.fixedFeeToman,
     reference,
     ...(discount
-      ? { discountCode: discount.code, discountToman }
+      ? {
+          discountCode: discount.code,
+          discountToman,
+          discountPercent: discount.discount_percent,
+        }
       : {}),
   }
-  await saveOrder(env, order)
-  if (discount) {
-    await writeAdminSettings(env, {
-      ...stored,
-      discountCodes: (stored.discountCodes ?? []).map((item) =>
-        item.code.toUpperCase() === discount.code.toUpperCase()
-          ? { ...item, usedCount: item.usedCount + 1 }
-          : item,
-      ),
-    })
+  try {
+    await saveOrder(env, order)
+  } catch (error) {
+    if (discount) {
+      await releaseTelegramDiscountReservation(env, orderId)
+    }
+    throw error
   }
   await upsertCustomer(
     env,
@@ -696,132 +803,222 @@ async function startPurchase(
     { username: order.username, firstName: order.firstName },
     { totalOrders: 1 },
   )
-  if (env.NOBULL_WALLET_DB) {
-    if (walletBalanceToman >= priceToman) {
-      let debit
-      try {
-        debit = await recordWalletPurchase(
-          env,
-          message.chat.id,
-          priceToman,
-          orderId,
-        )
-      } catch (error) {
-        console.error('Wallet purchase debit outcome is uncertain.', {
-          orderId,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        })
-        await saveOrder(env, {
-          ...order,
-          status: 'processing',
-          paymentMethod: 'wallet',
-          updatedAt: Date.now(),
-        })
-        await sendMessage(
-          env,
-          message.chat.id,
-          'وضعیت کسر وجه از کیف پول نامشخص است؛ سفارش برای بررسی پشتیبانی ثبت شد. لطفاً خرید را دوباره تکرار نکنید.',
-        )
-        return
-      }
-      if (debit.status === 'updated') {
-        const awaitingFulfillment: StoredOrder = {
-          ...order,
-          status: 'waiting_review',
-          paymentMethod: 'wallet',
-          updatedAt: Date.now(),
-        }
-        await saveOrder(env, awaitingFulfillment)
-        try {
-          await decideStoredOrder(env, orderId, 'approve')
-          await sendMessage(
-            env,
-            message.chat.id,
-            `✅ مبلغ ${new Intl.NumberFormat('fa-IR').format(priceToman)} تومان از کیف پول کسر شد و سفارش شما برای تحویل ثبت شد.`,
-          )
-        } catch (error) {
-          console.error('Wallet-funded order fulfillment failed.', {
-            orderId,
-            error: error instanceof Error ? error.message : 'Unknown error',
-          })
-          const currentOrder = (await listStoredOrders(env)).find(
-            (candidate) => candidate.orderId === orderId,
-          )
-          if (currentOrder && !currentOrder.deliveredCredentials) {
-            await saveOrder(env, {
-              ...currentOrder,
-              status: 'processing',
-              paymentMethod: 'wallet',
-              updatedAt: Date.now(),
-            })
-          }
-          await sendMessage(
-            env,
-            message.chat.id,
-            'مبلغ از کیف پول کسر شد، اما ثبت سفارش نزد تأمین‌کننده کامل نشد. پشتیبانی سفارش را پیگیری می‌کند؛ لطفاً دوباره خرید نکنید.',
-          )
-        }
-        return
-      }
-      if (debit.status === 'duplicate') {
-        await sendMessage(
-          env,
-          message.chat.id,
-          'درخواست خرید شما قبلاً ثبت شده است و از کیف پول دوباره مبلغی کسر نخواهد شد.',
-        )
-        return
-      }
-    }
+  await sendCheckoutInvoice(
+    env,
+    request,
+    message.chat.id,
+    order,
+    hasCardDetails ? cardNumber : '',
+    hasCardDetails ? cardHolder : '',
+    walletBalanceToman >= priceToman,
+  )
+}
+
+async function beginDiscountEntry(
+  env: TelegramEnvironment,
+  chatId: number,
+  orderId: string,
+): Promise<void> {
+  if (!env.NOBULL_SETTINGS) {
+    await sendMessage(env, chatId, 'ثبت کد تخفیف موقتاً در دسترس نیست.')
+    return
   }
-  if (
-    !cardNumber ||
-    !cardHolder ||
-    /X{2,}/i.test(cardNumber) ||
-    cardHolder === 'نام صاحب کارت'
-  ) {
+  const order = (await listStoredOrders(env)).find(
+    (candidate) =>
+      candidate.orderId === orderId &&
+      candidate.userId === String(chatId) &&
+      candidate.status === 'pending_receipt',
+  )
+  if (!order) {
+    await sendMessage(env, chatId, 'این فاکتور دیگر قابل ویرایش نیست.')
+    return
+  }
+  await env.NOBULL_SETTINGS.put(
+    discountEntryKey(chatId),
+    JSON.stringify({ orderId, userId: String(chatId) } satisfies DiscountEntryContext),
+    { expirationTtl: 10 * 60 },
+  )
+  await sendMessage(
+    env,
+    chatId,
+    'کد تخفیف را ارسال کنید. برای لغو، /cancel را بفرستید.',
+    { force_reply: true },
+  )
+}
+
+async function applyDiscountEntry(
+  request: Request,
+  env: TelegramEnvironment,
+  chatId: number,
+  code: string,
+  context: DiscountEntryContext,
+): Promise<void> {
+  const normalizedCode = code.trim().toUpperCase()
+  if (!/^[A-Z0-9_-]{2,20}$/.test(normalizedCode)) {
+    await sendMessage(env, chatId, 'فرمت کد معتبر نیست؛ کد را دوباره ارسال کنید.', {
+      force_reply: true,
+    })
+    return
+  }
+  const orders = await listStoredOrders(env)
+  const order = orders.find(
+    (candidate) =>
+      candidate.orderId === context.orderId &&
+      candidate.userId === String(chatId) &&
+      candidate.status === 'pending_receipt',
+  )
+  if (!order) {
+    await env.NOBULL_SETTINGS?.delete(discountEntryKey(chatId))
+    await sendMessage(env, chatId, 'این فاکتور دیگر قابل ویرایش نیست.')
+    return
+  }
+  const discount = await getTelegramDiscount(env, normalizedCode, order.orderId)
+  if (!discount) {
     await sendMessage(
       env,
-      message.chat.id,
-      'پرداخت این محصول در حال حاضر پیکربندی نشده است. لطفاً کمی بعد دوباره تلاش کنید.',
+      chatId,
+      'کد تخفیف نامعتبر است، غیرفعال شده یا ظرفیت استفاده از آن تکمیل است. کد دیگری بفرستید.',
+      { force_reply: true },
     )
     return
   }
-  const price = new Intl.NumberFormat('fa-IR').format(priceToman)
-  const invoice = [
-    '🧾 فاکتور خرید نوبول',
-    '',
-    `محصول: ${title}`,
-    `تأمین‌کننده: ${translateProductText(product.provider_name ?? product.provider_id ?? '—')}`,
-    `شناسه محصول: ${id}`,
-    ...(product.persian_description
-      ? [`توضیحات: ${product.persian_description}`]
-      : []),
-    `روش تحویل: ${getPersianDeliveryDescription(rawTitle, description)}`,
-    getPersianWarrantyDescription(rawTitle, description),
-    getPersianLoginInstructions(rawTitle, description),
-    ...(discount
-      ? [
-          `قیمت پیش از تخفیف: ${new Intl.NumberFormat('fa-IR').format(originalPriceToman)} تومان`,
-          `کد تخفیف ${discount.code}: ${new Intl.NumberFormat('fa-IR').format(discountToman)} تومان`,
-        ]
-      : []),
-    `مبلغ قابل پرداخت: ${price} تومان`,
-    '',
-    `شماره کارت: ${cardNumber}`,
-    `به نام: ${cardHolder}`,
-    '',
-    `پس از پرداخت، تصویر رسید را با کپشن buy_${product.provider_id ?? 'dante'}__${id} ارسال کنید یا در پاسخ به همین فاکتور بفرستید.`,
-  ].join('\n')
-  await sendMessage(env, message.chat.id, invoice, {
-    inline_keyboard: [
-      [
-        {
-          text: 'مشاهده فروشگاه NoBull',
-          web_app: { url: new URL('/', request.url).toString() },
-        },
-      ],
-    ],
+  const reserved = await reserveTelegramDiscount(
+    env,
+    discount.code,
+    order.orderId,
+  )
+  if (!reserved) {
+    await sendMessage(
+      env,
+      chatId,
+      'ظرفیت این کد تخفیف تکمیل شد. کد دیگری بفرستید.',
+      { force_reply: true },
+    )
+    return
+  }
+  const originalPriceToman =
+    order.originalPriceToman ??
+    order.priceToman + (order.discountToman ?? 0)
+  const discountToman = Math.round(
+    (originalPriceToman * discount.discount_percent) / 100,
+  )
+  const updatedOrder: StoredOrder = {
+    ...order,
+    discountCode: discount.code,
+    discountPercent: discount.discount_percent,
+    discountToman,
+    originalPriceToman,
+    priceToman: Math.max(0, originalPriceToman - discountToman),
+    estimatedProfitToman:
+      order.estimatedProfitToman + order.priceToman -
+      Math.max(0, originalPriceToman - discountToman),
+    updatedAt: Date.now(),
+  }
+  await saveOrder(env, updatedOrder)
+  await env.NOBULL_SETTINGS?.delete(discountEntryKey(chatId))
+
+  const settings = await readAdminSettings(env)
+  let walletBalanceToman = 0
+  if (env.NOBULL_WALLET_DB) {
+    try {
+      walletBalanceToman = (await getUserWallet(env, chatId)).balanceToman
+    } catch (error) {
+      console.error('Wallet balance could not be refreshed after discount.', {
+        chatId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+    }
+  }
+  const cardNumber = settings.cardNumber ?? env.ADMIN_CARD_NUMBER?.trim() ?? ''
+  const cardHolder = settings.cardHolder ?? env.ADMIN_CARD_HOLDER?.trim() ?? ''
+  await sendCheckoutInvoice(
+    env,
+    request,
+    chatId,
+    updatedOrder,
+    cardNumber,
+    cardHolder,
+    Boolean(env.NOBULL_WALLET_DB && walletBalanceToman >= updatedOrder.priceToman),
+  )
+}
+
+async function handleWalletPayment(
+  env: TelegramEnvironment,
+  chatId: number,
+  orderId: string,
+): Promise<void> {
+  if (!env.NOBULL_WALLET_DB) {
+    await sendMessage(env, chatId, 'پرداخت از کیف پول موقتاً در دسترس نیست.')
+    return
+  }
+  const order = (await listStoredOrders(env)).find(
+    (candidate) =>
+      candidate.orderId === orderId &&
+      candidate.userId === String(chatId) &&
+      candidate.status === 'pending_receipt',
+  )
+  if (!order) {
+    await sendMessage(env, chatId, 'این فاکتور دیگر قابل پرداخت نیست.')
+    return
+  }
+  const payment = await recordWalletPurchase(
+    env,
+    chatId,
+    order.priceToman,
+    order.orderId,
+    order.discountCode,
+  )
+  if (payment.status === 'discount_unavailable') {
+    await sendMessage(
+      env,
+      chatId,
+      'کد تخفیف دیگر قابل استفاده نیست و مبلغی از کیف پول کسر نشد. برای بررسی کد، دوباره «اعمال کد تخفیف» را بزنید.',
+    )
+    return
+  }
+  if (payment.status === 'insufficient') {
+    await sendMessage(env, chatId, 'موجودی کیف پول برای پرداخت این فاکتور کافی نیست.')
+    return
+  }
+  if (payment.status === 'duplicate') {
+    await sendMessage(env, chatId, 'پرداخت این فاکتور قبلاً ثبت شده است.')
+    return
+  }
+  await saveOrder(env, {
+    ...order,
+    status: 'waiting_review',
+    paymentMethod: 'wallet',
+    updatedAt: Date.now(),
   })
+  try {
+    await decideStoredOrder(env, order.orderId, 'approve')
+    await sendMessage(
+      env,
+      chatId,
+      `✅ مبلغ ${new Intl.NumberFormat('fa-IR').format(order.priceToman)} تومان از کیف پول کسر شد و سفارش شما برای تحویل ثبت شد.`,
+    )
+  } catch (error) {
+    console.error('Wallet-funded order fulfillment failed.', {
+      orderId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    const currentOrder = (await listStoredOrders(env)).find(
+      (candidate) => candidate.orderId === orderId,
+    )
+    if (currentOrder && !currentOrder.deliveredCredentials) {
+      await saveOrder(env, {
+        ...currentOrder,
+        status: 'processing',
+        paymentMethod: 'wallet',
+        updatedAt: Date.now(),
+      })
+    }
+    await sendMessage(
+      env,
+      chatId,
+      'مبلغ از کیف پول کسر شد، اما ثبت سفارش نزد تأمین‌کننده کامل نشد. پشتیبانی سفارش را پیگیری می‌کند؛ لطفاً دوباره خرید نکنید.',
+    )
+  }
 }
 
 function parseProductReference(
@@ -1387,8 +1584,28 @@ export async function onRequestPost({
         callback_query_id: callback.id,
         text: 'در حال پردازش...',
       })
-      if (isAdminActor) {
+      if (isAdminActor && isAdminAction) {
         await handleAdminCallback(env, request, callback)
+      } else if (
+        /^discount:apply:[a-f0-9-]{16,64}$/i.test(data) &&
+        callback.message?.chat.type === 'private' &&
+        callback.message.chat.id === callback.from.id
+      ) {
+        await beginDiscountEntry(
+          env,
+          callback.from.id,
+          data.slice('discount:apply:'.length),
+        )
+      } else if (
+        /^wallet:pay:[a-f0-9-]{16,64}$/i.test(data) &&
+        callback.message?.chat.type === 'private' &&
+        callback.message.chat.id === callback.from.id
+      ) {
+        await handleWalletPayment(
+          env,
+          callback.from.id,
+          data.slice('wallet:pay:'.length),
+        )
       } else if (
         (data === 'wallet:topup' || data === 'wallet:balance') &&
         callback.message?.chat.type === 'private' &&
@@ -1432,6 +1649,27 @@ export async function onRequestPost({
         console.error('Telegram user registration failed.', {
           error: error instanceof Error ? error.message : 'Unknown error',
         })
+      }
+    }
+    if (privateMessage && text && env.NOBULL_SETTINGS) {
+      const discountEntry = await env.NOBULL_SETTINGS.get<DiscountEntryContext>(
+        discountEntryKey(message.chat.id),
+        'json',
+      )
+      if (discountEntry?.userId === String(message.chat.id)) {
+        if (text.toLowerCase() === '/cancel') {
+          await env.NOBULL_SETTINGS.delete(discountEntryKey(message.chat.id))
+          await sendMessage(env, message.chat.id, 'ورود کد تخفیف لغو شد.')
+        } else {
+          await applyDiscountEntry(
+            request,
+            env,
+            message.chat.id,
+            text,
+            discountEntry,
+          )
+        }
+        return jsonResponse({ ok: true })
       }
     }
     if (admin && command.startsWith('/')) {
