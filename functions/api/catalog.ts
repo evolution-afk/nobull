@@ -192,6 +192,17 @@ async function getUsdtRate(
   return rate
 }
 
+/**
+ * The upstream provider sometimes groups Apple TV products under a wrong
+ * brand (e.g. "Gemini"). Correct the dirty brand on the fly from the title
+ * before products are grouped or returned.
+ */
+function correctBrandName(productName: string, brand: string): string {
+  const haystack = productName.toLowerCase()
+  if (haystack.includes('اپل') || haystack.includes('apple')) return 'Apple'
+  return brand
+}
+
 function calculateProducts(
   products: unknown[],
   usdtRate: number,
@@ -208,20 +219,30 @@ function calculateProducts(
     const productId = rawId === undefined || rawId === null
       ? undefined
       : `${provider.id}--${String(rawId)}`
+    const override = productId
+      ? settings.productOverrides?.[productId]
+      : undefined
     const clean: Record<string, unknown> = {}
     for (const field of PRODUCT_FIELDS) {
       if (field in record) clean[field] = record[field]
     }
-    clean.persian_name = translateProductText(
-      productText(record.name ?? record.title ?? record.product_name) ||
-        'محصول دیجیتال',
+    const productName = productText(
+      record.name ?? record.title ?? record.product_name,
     )
-    const description = productText(record.description ?? record.subtitle)
-    clean.persian_description = translateProductText(description)
-    clean.warnings = parseProductWarnings(description)
-    clean.persian_brand = translateProductText(
+    clean.persian_name = translateProductText(productName || 'محصول دیجیتال')
+    const correctedBrand = correctBrandName(
+      productName,
       productText(record.brand ?? record.brand_name),
     )
+    if (correctedBrand) clean.brand = correctedBrand
+    clean.persian_brand = translateProductText(correctedBrand)
+    const upstreamDescription = productText(record.description ?? record.subtitle)
+    const localDescription =
+      typeof override?.description === 'string' ? override.description.trim() : ''
+    const description = localDescription || upstreamDescription
+    clean.description = description
+    clean.persian_description = translateProductText(description)
+    clean.warnings = parseProductWarnings(description)
     if (rawId !== undefined && rawId !== null) {
       clean.provider_product_id = String(rawId)
       clean.id = productId
@@ -240,9 +261,6 @@ function calculateProducts(
       settings,
       productId,
     )
-    const override = productId
-      ? settings.productOverrides?.[productId]
-      : undefined
     clean.featured = override?.featured === true
     clean.hidden = override?.hidden === true
     clean.usdt_rate_used = usdtRate

@@ -71,6 +71,8 @@ interface AdminCatalogProduct {
   persian_name?: string
   brand?: string
   persian_brand?: string
+  description?: string
+  persian_description?: string
   price_usd?: number
   usdt_rate_used?: number
   price_toman?: number
@@ -132,6 +134,7 @@ interface ProductOverride {
   customPriceToman?: number
   featured?: boolean
   hidden?: boolean
+  description?: string
 }
 
 interface PromoCode {
@@ -246,7 +249,7 @@ function AdminDashboard() {
   const [refreshingBalance, setRefreshingBalance] = useState(false)
   const [walletDrafts, setWalletDrafts] = useState<Record<string, string>>({})
   const [productDrafts, setProductDrafts] = useState<
-    Record<string, { margin: string; price: string }>
+    Record<string, { margin: string; price: string; description: string }>
   >({})
   const [promoDraft, setPromoDraft] = useState({
     code: '',
@@ -482,6 +485,7 @@ function AdminDashboard() {
     const draft = productDrafts[productId] ?? {
       margin: String(product.appliedMarginPercent ?? 0),
       price: String(product.price_toman ?? 0),
+      description: '',
     }
     setBusy(true)
     setError('')
@@ -503,6 +507,35 @@ function AdminDashboard() {
       setRefreshKey((current) => current + 1)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'ذخیره قیمت محصول ناموفق بود.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveProductDescription = async (
+    product: AdminCatalogProduct,
+    description: string,
+  ) => {
+    const productId = product.id
+    if (!productId) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await post({
+        action: 'save-product-override',
+        productId,
+        description: description.trim(),
+      })
+      setNotice('توضیحات اختصاصی محصول ذخیره شد.')
+      setProductDrafts((current) => {
+        const next = { ...current }
+        delete next[productId]
+        return next
+      })
+      setRefreshKey((current) => current + 1)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'ذخیره توضیحات محصول ناموفق بود.')
     } finally {
       setBusy(false)
     }
@@ -871,8 +904,8 @@ function AdminDashboard() {
           </div>
           {data.catalog.error && <p className="text-xs text-amber-100">{data.catalog.error}</p>}
           <div className="overflow-x-auto rounded-2xl border border-white/[0.08]">
-            <table className="w-full min-w-[1450px] text-right text-xs">
-              <thead className="bg-white/[0.035] text-white/45"><tr>{['نام محصول و برند', 'قیمت خرید دلاری', 'قیمت خرید به تومان و ریال', 'درصد سود', 'قیمت فروش نهایی', 'سود خالص هر فروش', 'پیشنهاد ویژه / نمایش', 'موجودی'].map((title) => <th key={title} className="p-3 font-medium">{title}</th>)}</tr></thead>
+            <table className="w-full min-w-[1750px] text-right text-xs">
+              <thead className="bg-white/[0.035] text-white/45"><tr>{['نام محصول و برند', 'توضیحات اختصاصی (Local Description)', 'قیمت خرید دلاری', 'قیمت خرید به تومان و ریال', 'درصد سود', 'قیمت فروش نهایی', 'سود خالص هر فروش', 'پیشنهاد ویژه / نمایش', 'موجودی'].map((title) => <th key={title} className="p-3 font-medium">{title}</th>)}</tr></thead>
               <tbody className="divide-y divide-white/[0.06]">
                 {filteredCatalog.map((product) => {
                   const stock = Number(product.stock)
@@ -881,11 +914,13 @@ function AdminDashboard() {
                   const draft = productDrafts[productId] ?? {
                     margin: String(product.appliedMarginPercent ?? 0),
                     price: String(product.price_toman ?? 0),
+                    description: data.pricing.productOverrides[productId]?.description ?? '',
                   }
                   const buyCostToman = Number(product.buyCostToman ?? 0)
                   const salePrice = Number(product.price_toman ?? 0)
                   return <tr key={productId || product.provider_product_id} className={`align-top text-white/70 ${product.hidden ? 'opacity-55' : ''}`}>
                     <td className="p-3"><div className="max-w-52 font-semibold">{product.persian_name || translateProductText(product.name || 'محصول')}</div><div className="mt-1 text-[10px] text-white/40">{product.persian_brand || translateProductText(product.brand || '—')} · {product.provider_product_id ?? product.id}</div></td>
+                    <td className="w-72 p-3"><label className="sr-only" htmlFor={`description-${productId}`}>توضیحات اختصاصی {product.persian_name || translateProductText(product.name || '')}</label><textarea id={`description-${productId}`} rows={3} maxLength={4000} value={draft.description} onChange={(event) => setProductDrafts((current) => ({ ...current, [productId]: { ...draft, description: event.target.value } }))} placeholder={product.persian_description || translateProductText(product.description || '') || 'توضیحات اختصاصی این محصول…'} className="w-full resize-y rounded-lg border border-white/10 bg-black/50 px-2 py-2 text-[11px] text-white outline-none placeholder:text-white/25 focus:border-emerald-300/40" /><button type="button" onClick={() => void saveProductDescription(product, draft.description)} disabled={busy || !productId} className="mt-2 block rounded-lg bg-emerald-300/10 px-2.5 py-1.5 text-[10px] text-emerald-100 disabled:opacity-40">ذخیره توضیحات</button></td>
                     <td dir="ltr" className="p-3 text-right">${Number(product.price_usd ?? 0).toFixed(2)}</td>
                     <td className="p-3"><div>{formatToman(buyCostToman)}</div><div className="mt-1 text-[10px] text-white/40">{formatNumber(Math.round(buyCostToman * 10))} ریال</div><div className="mt-1 text-[9px] text-white/30">نرخ تتر: {formatNumber(Number(product.usdt_rate_used ?? 0))} تومان</div></td>
                     <td className="w-32 p-3"><label className="sr-only" htmlFor={`margin-${productId}`}>درصد سود {product.persian_name || translateProductText(product.name || '')}</label><div className="flex items-center gap-1"><input id={`margin-${productId}`} type="number" min="0" max="1000" step="0.1" value={draft.margin} onChange={(event) => setProductDrafts((current) => ({ ...current, [productId]: { ...draft, margin: event.target.value } }))} className="w-24 rounded-lg border border-white/10 bg-black/50 px-2 py-2 text-sm text-white" /><span>%</span></div><button type="button" onClick={() => void saveProductOverride(product, 'margin')} disabled={busy || !productId} className="mt-2 block rounded-lg bg-emerald-300/10 px-2.5 py-1.5 text-[10px] text-emerald-100 disabled:opacity-40">ذخیره سود</button></td>
@@ -895,7 +930,7 @@ function AdminDashboard() {
                     <td className="p-3">{inStock === null ? 'نامشخص' : inStock ? 'موجود' : 'ناموجود'}</td>
                   </tr>
                 })}
-                {!filteredCatalog.length && <tr><td colSpan={8} className="p-8 text-center text-white/35">محصولی یافت نشد.</td></tr>}
+                {!filteredCatalog.length && <tr><td colSpan={9} className="p-8 text-center text-white/35">محصولی یافت نشد.</td></tr>}
               </tbody>
             </table>
           </div>

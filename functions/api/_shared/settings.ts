@@ -92,6 +92,7 @@ export interface ProductOverride {
   customPriceToman?: number
   featured?: boolean
   hidden?: boolean
+  description?: string
 }
 
 export interface PromoCode {

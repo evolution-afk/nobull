@@ -856,8 +856,21 @@ export async function onRequestPost({
       const customPriceToman = body.customPriceToman
       const hasMargin = Object.hasOwn(body, 'customMarginPercent')
       const hasPrice = Object.hasOwn(body, 'customPriceToman')
-      if (!hasMargin && !hasPrice) {
-        return jsonResponse({ error: 'درصد سود یا قیمت فروش معتبر نیست.' }, 400)
+      const hasDescription = Object.hasOwn(body, 'description')
+      if (!hasMargin && !hasPrice && !hasDescription) {
+        return jsonResponse({ error: 'درصد سود، قیمت فروش یا توضیحات معتبر نیست.' }, 400)
+      }
+      if (hasDescription) {
+        if (body.description !== undefined && typeof body.description !== 'string') {
+          return jsonResponse({ error: 'توضیحات اختصاصی معتبر نیست.' }, 400)
+        }
+        const description =
+          typeof body.description === 'string' ? body.description.trim() : ''
+        if (description.length > 4000) {
+          return jsonResponse({ error: 'توضیحات اختصاصی معتبر نیست.' }, 400)
+        }
+        if (description) override.description = description
+        else delete override.description
       }
       if (hasMargin) {
         if (
