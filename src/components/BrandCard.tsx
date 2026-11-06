@@ -2,6 +2,7 @@ import { ArrowUpLeft, ChevronDown } from 'lucide-react'
 import type { BrandGroup, Product } from '../types'
 import { BrandLogo } from './BrandLogo'
 import { PlanCard } from './PlanCard'
+import { ProductWarnings } from './ProductWarnings'
 import { formatNumber } from '../utils/format'
 import { translateProductText } from '../utils/persianTranslator'
 
@@ -44,6 +45,11 @@ export function BrandCard({
           <p className="line-clamp-1 text-[13px] font-bold text-white/90">
             {translateProductText(group.lowestPlan.name)}
           </p>
+          <ProductWarnings
+            warnings={group.lowestPlan.warnings}
+            max={2}
+            className="mt-2.5"
+          />
           <p className="mt-2 line-clamp-2 text-[13px] leading-6 text-white/60">
             {summary}
           </p>

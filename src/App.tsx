@@ -36,10 +36,12 @@ import {
 import AdminDashboard from './AdminDashboard'
 import type { Product, ServiceGuide, StockStatus } from './types'
 import { formatNumber, formatToman, stockLabel } from './utils/format'
+import { normalizeProductWarnings } from './utils/productWarnings'
 import { BrandCard } from './components/BrandCard'
 import { BrandLogo } from './components/BrandLogo'
 import { FeaturedOffer } from './components/FeaturedOffer'
 import { PlanCard } from './components/PlanCard'
+import { ProductWarnings } from './components/ProductWarnings'
 import { ServiceGuideContent } from './components/ServiceGuideContent'
 import { TrustFacts } from './components/TrustFacts'
 
@@ -533,6 +535,22 @@ function getServiceGuide(
   brand: string,
   category: string,
 ): ServiceGuide {
+  if (/\b(?:api|chatgpt|claude|codex)\b|هوش مصنوعی/i.test(`${brandKey} ${brand} ${category}`)) {
+    return {
+      title: 'راهنمای سرویس‌های هوش مصنوعی و API',
+      summary: 'ابزارهای هوش مصنوعی و API برای توسعه و پردازش اطلاعات.',
+      description:
+        'این محصول یک سرویس هوش مصنوعی یا API توسعه‌دهندگان است. از این ابزار می‌توانید برای پردازش متن، کدنویسی، تحلیل داده یا اتصال به اپلیکیشن‌های خود استفاده کنید.',
+      planDifferences:
+        'دسترسی، مدل‌ها، سهمیه مصرف و روش اتصال به نوع پلن بستگی دارد؛ جزئیات همان محصول را پیش از خرید بررسی کنید.',
+      tips: [
+        'محدودیت مصرف، دسترسی API و هزینه‌های احتمالی را در توضیحات محصول بررسی کنید.',
+        'کلیدهای API و اطلاعات ورود را محرمانه نگه دارید.',
+        'قابلیت‌ها و سقف استفاده را بر اساس شرایط همان پلن بسنجید.',
+      ],
+    }
+  }
+
   const categoryAlias =
     /موسیقی|ویدیو|سرگرمی/.test(category)
       ? 'موسیقی و ویدیو'
@@ -548,8 +566,9 @@ function getServiceGuide(
     categoryGuides[category] ??
     categoryGuides[categoryAlias] ?? {
       title: `معرفی ${brand}`,
-      summary: `${brand}؛ سرویس دیجیتال برای کار، یادگیری یا سرگرمی.`,
-      description: `${brand} یک سرویس دیجیتال برای استفاده آنلاین در حوزه ${category || 'ابزارهای دیجیتال'} است. قابلیت‌های دقیق به محصول و نوع اشتراک وابسته است؛ پیش از خرید مشخصات هر پلن، مدت، محدودیت‌ها و روش فعال‌سازی را بخوانید و درباره ویژگی‌ای که صریحاً درج نشده فرض نسازید.`,
+      summary: `${brand}؛ یک محصول دیجیتال.`,
+      description:
+        'این یک محصول و لایسنس دیجیتال است. لطفاً برای آگاهی از نحوه استفاده، توضیحات اختصاصی تامین‌کننده و هشدارهای سیستم را به دقت مطالعه کنید.',
       planDifferences:
         '«کد فعال‌سازی» را خودتان روی اکانت شخصی وارد می‌کنید؛ «Trial» دسترسی آزمایشی و محدود است؛ «دعوتی» با ایمیل شما انجام می‌شود؛ و «اشتراکی» یعنی دسترسی یا منابع با افراد دیگر مشترک است. «اکانت آماده» هم لزوماً به معنی مالکیت کامل یا امکان تغییر اطلاعات نیست.',
       tips: [
@@ -708,6 +727,7 @@ function normalizeProducts(payload: unknown): Product[] {
       const purchaseUrl = asText(
         record.purchase_url ?? record.telegram_url ?? record.mini_app_url,
       )
+      const description = asText(record.description ?? record.subtitle)
 
       return {
         id,
@@ -720,10 +740,10 @@ function normalizeProducts(payload: unknown): Product[] {
         brandAsset,
         category,
         persianCategory,
-        description: asText(record.description ?? record.subtitle),
+        description,
         persianDescription:
-          asText(record.persian_description) ||
-          translateProductText(asText(record.description ?? record.subtitle)),
+          asText(record.persian_description) || translateProductText(description),
+        warnings: normalizeProductWarnings(record.warnings, description),
         price_toman: priceToman,
         usdt_rate_used: Number.isFinite(Number(record.usdt_rate_used))
           ? Number(record.usdt_rate_used)
@@ -1926,6 +1946,8 @@ function PurchaseModal({
   const purchaseDetails = `سفارش نوبول\nشناسه محصول: ${product.id}\nمبلغ به تومان: ${new Intl.NumberFormat('fa-IR').format(tomanPrice)}${discountCode ? `\nکد تخفیف: ${discountCode}` : ''}`
   const persianTitle = product.persianName
   const planBadges = getPersianProductBadges(product.name, product.description)
+  const productDescription =
+    typeof product.description === 'string' ? product.description : ''
 
   return (
     <div
@@ -2029,26 +2051,47 @@ function PurchaseModal({
                 : discountError}
           </p>
         </div>
-        <div className="mt-3 rounded-xl border border-emerald-300/15 bg-emerald-300/[0.035] p-3">
-          <p className="text-[11px] font-semibold text-emerald-100">
-            روش تحویل این پلن
+        <ProductWarnings warnings={product.warnings} className="mt-3" />
+        {productDescription.trim() ? (
+          <div className="mt-3 rounded-xl border border-white/[0.08] bg-black/30 p-3 text-[10px] leading-6 text-white/70">
+            <p className="mb-2 font-semibold text-white/75">توضیحات اصلی محصول</p>
+            {productDescription.split(/\r?\n/).map((line, index) => (
+              <p
+                key={index}
+                dir="auto"
+                className="mb-2 whitespace-pre-wrap break-words last:mb-0"
+              >
+                {line || '\u00a0'}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500 italic text-right mt-2">
+            توضیحات اختصاصی برای این محصول از سوی تامین‌کننده ثبت نشده است.
           </p>
-          <p className="mt-1.5 text-[10px] leading-6 text-white/60">
-            {getPersianDeliveryDescription(product.name, product.description)}
-          </p>
-          <p className="mt-2 border-t border-white/[0.07] pt-2 text-[10px] leading-6 text-white/55">
-            {getPersianWarrantyDescription(product.name, product.description)}
-          </p>
-          <p className="mt-2 text-[10px] leading-6 text-white/50">
-            {getPersianLoginInstructions(product.name, product.description)}
-          </p>
-          {product.persianDescription && (
-            <p className="mt-2 border-t border-white/[0.07] pt-2 text-[10px] leading-6 text-white/50">
-              {product.persianDescription}
-            </p>
-          )}
-        </div>
-        <ServiceGuideContent guide={guide} />
+        )}
+        <details className="mt-3 rounded-xl border border-emerald-300/15 bg-emerald-300/[0.035] p-3">
+          <summary className="cursor-pointer select-none text-[11px] font-semibold text-emerald-100 marker:text-emerald-200">
+            💡 راهنمای عمومی و اصطلاحات خریداران
+          </summary>
+          <div className="mt-3">
+            <div className="rounded-xl border border-white/[0.08] bg-black/30 p-3">
+              <p className="text-[11px] font-semibold text-emerald-100">
+                روش تحویل این پلن
+              </p>
+              <p className="mt-1.5 text-[10px] leading-6 text-white/60">
+                {getPersianDeliveryDescription(product.name, product.description)}
+              </p>
+              <p className="mt-2 border-t border-white/[0.07] pt-2 text-[10px] leading-6 text-white/55">
+                {getPersianWarrantyDescription(product.name, product.description)}
+              </p>
+              <p className="mt-2 text-[10px] leading-6 text-white/50">
+                {getPersianLoginInstructions(product.name, product.description)}
+              </p>
+            </div>
+            <ServiceGuideContent guide={guide} />
+          </div>
+        </details>
 
         {botUrl && product.status !== 'unavailable' ? (
           <>

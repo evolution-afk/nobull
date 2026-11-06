@@ -17,6 +17,7 @@ import {
   type ProviderConfig,
 } from './_shared/settings'
 import { authenticateAdminRequest } from './admin'
+import { parseProductWarnings } from './_shared/warningParser'
 import { translateProductText } from '../../src/utils/persianTranslator'
 
 interface CatalogEnvironment
@@ -215,9 +216,9 @@ function calculateProducts(
       productText(record.name ?? record.title ?? record.product_name) ||
         'محصول دیجیتال',
     )
-    clean.persian_description = translateProductText(
-      productText(record.description ?? record.subtitle),
-    )
+    const description = productText(record.description ?? record.subtitle)
+    clean.persian_description = translateProductText(description)
+    clean.warnings = parseProductWarnings(description)
     clean.persian_brand = translateProductText(
       productText(record.brand ?? record.brand_name),
     )

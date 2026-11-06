@@ -1,4 +1,10 @@
+import type {
+  ProductWarning,
+  ProductWarningLevel,
+} from '../functions/api/_shared/warningParser'
 import type { BrandAsset } from './utils/brandAssets'
+
+export type { ProductWarning, ProductWarningLevel }
 
 export type StockStatus = 'available' | 'unavailable' | 'unknown'
 
@@ -21,6 +27,7 @@ export interface Product {
   status: StockStatus
   purchaseUrl: string | null
   featured: boolean
+  warnings: ProductWarning[]
 }
 
 export interface ServiceGuide {
