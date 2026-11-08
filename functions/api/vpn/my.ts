@@ -77,9 +77,11 @@ const ACTIVE_SUBSCRIPTIONS_QUERY = `
          s.server_code,
          s.provision_status
   FROM subscriptions s
-  JOIN users u ON u.id = s.customer_id
   LEFT JOIN plans p ON p.id = s.plan_id
-  WHERE u.telegram_id = ? AND s.status = 'active'
+  WHERE s.customer_id = (
+    SELECT id FROM users WHERE telegram_id = ?
+  )
+    AND s.status = 'active'
   ORDER BY s.created_at DESC`
 
 const ACTIVE_SERVERS_QUERY =
