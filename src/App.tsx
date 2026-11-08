@@ -23,6 +23,7 @@ import {
   CircleHelp,
   Clock3,
   Copy,
+  Globe,
   KeyRound,
   LockKeyhole,
   MessageCircle,
@@ -37,6 +38,7 @@ import AdminDashboard from './AdminDashboard'
 import type { Product, ServiceGuide, StockStatus } from './types'
 import { formatNumber, formatToman, stockLabel } from './utils/format'
 import { normalizeProductWarnings } from './utils/productWarnings'
+import { getTelegramInitData } from './utils/telegram'
 import { BrandCard } from './components/BrandCard'
 import { BrandLogo } from './components/BrandLogo'
 import { FeaturedOffer } from './components/FeaturedOffer'
@@ -44,6 +46,8 @@ import { PlanCard } from './components/PlanCard'
 import { ProductWarnings } from './components/ProductWarnings'
 import { ServiceGuideContent } from './components/ServiceGuideContent'
 import { TrustFacts } from './components/TrustFacts'
+import { VpnCatalog } from './components/VpnCatalog'
+import { VpnSubscriptions } from './components/VpnSubscriptions'
 
 interface ProductRecord {
   [key: string]: unknown
@@ -767,8 +771,14 @@ function telegramUrl(product: Product, discountCode?: string): string | null {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'catalog' | '2fa' | 'account' | 'admin'>(() =>
-    window.location.hash === '#admin' ? 'admin' : 'catalog',
+  const [activeTab, setActiveTab] = useState<
+    'catalog' | 'vpn' | '2fa' | 'account' | 'admin'
+  >(() =>
+    window.location.hash === '#admin'
+      ? 'admin'
+      : window.location.hash === '#vpn'
+        ? 'vpn'
+        : 'catalog',
   )
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(true)
@@ -790,11 +800,7 @@ function App() {
   const [accountData, setAccountData] = useState<AccountResponse | null>(null)
   const [accountLoading, setAccountLoading] = useState(false)
   const [accountError, setAccountError] = useState('')
-  const telegramInitData = (
-    window as Window & {
-      Telegram?: { WebApp?: { initData?: string; ready?: () => void } }
-    }
-  ).Telegram?.WebApp?.initData
+  const telegramInitData = getTelegramInitData()
   const accountErrorMessage =
     accountError ||
     (!telegramInitData
@@ -1157,6 +1163,15 @@ function App() {
             label="کاتالوگ اشتراک‌ها"
           />
           <NavTab
+            active={activeTab === 'vpn'}
+            onClick={() => {
+              window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#vpn`)
+              setActiveTab('vpn')
+            }}
+            icon={<Globe size={16} aria-hidden="true" />}
+            label="خرید وی‌پی‌ان (آی‌پی ثابت)"
+          />
+          <NavTab
             active={activeTab === 'account'}
             onClick={() => {
               window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
@@ -1510,7 +1525,20 @@ function App() {
               )}
             </section>
           </>
+        ) : activeTab === 'vpn' ? (
+          <VpnCatalog
+            onOpenWallet={() => {
+              window.history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}${window.location.search}`,
+              )
+              setActiveTab('account')
+              loadAccount()
+            }}
+          />
         ) : activeTab === 'account' ? (
+          <>
           <section className="mx-auto mt-8 max-w-4xl rounded-[28px] border border-white/[0.1] bg-[#080b0c]/90 p-5 shadow-[0_24px_100px_rgba(0,0,0,0.65)] sm:mt-12 sm:p-8">
             <div className="flex items-start gap-3">
               <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-primary/25 bg-primary/[0.08] text-primary">
@@ -1562,6 +1590,8 @@ function App() {
               </>
             ) : null}
           </section>
+          <VpnSubscriptions />
+          </>
         ) : activeTab === '2fa' ? (
           <section className="mx-auto mt-8 max-w-2xl rounded-[28px] border border-white/[0.1] bg-[#080b0c]/90 p-5 shadow-[0_24px_100px_rgba(0,0,0,0.65),0_0_45px_rgba(0,242,255,0.05)] sm:mt-12 sm:p-8">
             <div className="text-center">

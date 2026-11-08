@@ -2,6 +2,12 @@ import type { ServerResponse } from 'node:http'
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 
+/**
+ * Default port of `wrangler pages dev`, where the Pages Functions in
+ * functions/ run with the real D1/KV/VAR bindings during local development.
+ */
+const DEFAULT_WRANGLER_DEV_URL = 'http://127.0.0.1:8788'
+
 interface ServerSettings {
   danteKey: string
   usdtMode: string
@@ -237,8 +243,41 @@ export default defineConfig(({ mode }) => {
     profitMarginPercent: Number(env.PROFIT_MARGIN_PERCENT) || 0,
     fixedFeeToman: Number(env.FIXED_FEE_TOMAN) || 0,
   }
+  const wranglerDevUrl =
+    env.WRANGLER_DEV_URL?.trim() || DEFAULT_WRANGLER_DEV_URL
 
   return {
     plugins: [react(), createCatalogPlugin(settings)],
+    server: {
+      proxy: {
+        // /api/catalog stays on the plugin above; everything under /api/vpn
+        // (catalog + checkout) is served by the local Pages Functions runtime.
+        '/api/vpn': {
+          target: wranglerDevUrl,
+          changeOrigin: true,
+          configure(proxy) {
+            proxy.on('error', (error, _request, response) => {
+              console.error(
+                `VPN API proxy could not reach ${wranglerDevUrl}. Start "wrangler pages dev" to serve /api/vpn.`,
+                error.message,
+              )
+              const serverResponse = response as ServerResponse | undefined
+              if (
+                !serverResponse ||
+                typeof serverResponse.writeHead !== 'function' ||
+                serverResponse.headersSent
+              ) {
+                return
+              }
+              jsonResponse(serverResponse, 502, {
+                ok: false,
+                error:
+                  'سرویس وی‌پی‌ان روی سرور محلی فعال نیست؛ wrangler pages dev را اجرا کنید.',
+              })
+            })
+          },
+        },
+      },
+    },
   }
 })

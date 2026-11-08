@@ -965,7 +965,7 @@ export async function onRequestPost({
       }
       if (env.NOBULL_WALLET_DB) {
         if (type === 'percent') {
-          const usedCount = await syncTelegramDiscount(env, {
+          const syncedUsedCount = await syncTelegramDiscount(env, {
             code,
             discountPercent: value,
             maxUsage: maxUses,
@@ -975,7 +975,7 @@ export async function onRequestPost({
               ? { expiresAt: new Date(expiresAt).toISOString() }
               : {}),
           })
-          updated = { ...updated, usedCount }
+          updated = { ...updated, usedCount: syncedUsedCount }
         } else {
           await disableTelegramDiscount(env, code)
         }

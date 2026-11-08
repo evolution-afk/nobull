@@ -47,3 +47,62 @@ export interface BrandGroup {
   availablePlans: number
   lowestPlan: Product
 }
+
+export interface VpnPlan {
+  id: string
+  plan_code: string
+  name: string
+  name_en: string | null
+  quota_gb: number
+  duration_days: number | null
+  price_amount: number
+  price_currency: string
+  max_speed_mbps: number | null
+}
+
+export interface VpnServer {
+  code: string
+  name: string
+  protocol_default: string
+}
+
+export interface VpnCheckoutResult {
+  username: string
+  password: string
+  configUrl: string | null
+  orderId: string
+  orderReference: string
+  expiresAt: string | null
+  planId: string
+  planTitle: string
+  quotaGb: number
+  durationDays: number
+  serverCode: string
+  serverName: string
+  walletBalanceToman: number
+}
+
+export interface VpnUsageSnapshot {
+  used_gb: number
+  quota_gb: number
+  remaining_gb: number
+  bytes_total: number | null
+  bytes_used: number | null
+  live: boolean
+}
+
+export interface VpnSubscription {
+  id: number
+  plan_id: string
+  plan_name: string
+  plan_name_en: string | null
+  status: string
+  start_date: string | null
+  expiry_date: string | null
+  quota_limit_gb: number
+  quota_used_gb: number
+  radius_username: string
+  server_code: string
+  provision_status: string | null
+  usage: VpnUsageSnapshot
+}

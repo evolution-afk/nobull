@@ -8,6 +8,22 @@ function fromHex(value: string): Uint8Array | null {
   )
 }
 
+/**
+ * Extracts the signed Telegram WebApp payload from a request. The storefront
+ * passes it as a query param because download links cannot set headers; API
+ * clients may instead use `X-Telegram-Init-Data` or `Authorization: tma <initData>`.
+ */
+export function readTelegramInitData(request: Request): string {
+  const fromQuery = new URL(request.url).searchParams.get('initData')?.trim()
+  if (fromQuery) return fromQuery
+  const fromHeader = request.headers.get('X-Telegram-Init-Data')?.trim()
+  if (fromHeader) return fromHeader
+  const authorization = request.headers.get('Authorization')?.trim() ?? ''
+  return authorization.toLowerCase().startsWith('tma ')
+    ? authorization.slice(4).trim()
+    : ''
+}
+
 export async function verifyTelegramWebAppInitData(
   env: BackendEnvironment,
   initData: string,

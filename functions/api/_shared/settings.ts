@@ -16,21 +16,27 @@ export interface SettingsKV {
   }>
 }
 
-export interface WalletDatabaseStatement {
-  bind(...values: Array<string | number>): WalletDatabaseStatement
-  first<T>(): Promise<T | null>
-  all<T>(): Promise<{ results: T[] }>
-  run(): Promise<{
-    success: boolean
-    meta: { changes?: number }
-  }>
+/**
+ * Minimal structural types for the subset of Cloudflare's D1 API used by these
+ * Pages Functions. They mirror the `@cloudflare/workers-types` shape without
+ * pulling that dependency into the Vite app's type graph.
+ */
+export interface D1Result<T = unknown> {
+  results: T[]
+  success: boolean
+  meta: { changes?: number }
 }
 
-export interface WalletDatabase {
-  prepare(query: string): WalletDatabaseStatement
-  batch(
-    statements: WalletDatabaseStatement[],
-  ): Promise<Array<{ success: boolean; meta: { changes?: number } }>>
+export interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement
+  first<T = unknown>(): Promise<T | null>
+  all<T = unknown>(): Promise<D1Result<T>>
+  run(): Promise<D1Result>
+}
+
+export interface D1Database {
+  prepare(query: string): D1PreparedStatement
+  batch(statements: D1PreparedStatement[]): Promise<D1Result[]>
 }
 
 export interface UserWallet {
@@ -121,8 +127,10 @@ export interface BackendEnvironment {
   TELEGRAM_WEBHOOK_SECRET?: string
   TELEGRAM_ADMIN_CHAT_ID?: string
   TELEGRAM_BOT_TOKEN?: string
-  NOBULL_WALLET_DB?: WalletDatabase
+  NOBULL_WALLET_DB?: D1Database
   VAULT_ENCRYPTION_KEY?: string
+  VAR_API_URL?: string
+  VAR_API_TOKEN?: string
 }
 
 export type OrderStatus =
