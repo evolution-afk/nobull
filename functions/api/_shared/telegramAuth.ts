@@ -24,26 +24,45 @@ export function readTelegramInitData(request: Request): string {
     : ''
 }
 
+type TelegramInitDataFailure =
+  | 'bot_token_missing'
+  | 'payload_missing'
+  | 'payload_too_large'
+  | 'hash_missing_or_invalid'
+  | 'auth_date_invalid'
+  | 'auth_date_in_future'
+  | 'auth_date_expired'
+  | 'user_missing'
+  | 'signature_invalid'
+  | 'user_json_invalid'
+  | 'user_id_invalid'
+  | 'verification_error'
+
 export async function verifyTelegramWebAppInitData(
   env: BackendEnvironment,
   initData: string,
+  onFailure?: (reason: TelegramInitDataFailure) => void,
 ): Promise<{ id: string; firstName: string; username: string } | null> {
+  const fail = (reason: TelegramInitDataFailure) => {
+    onFailure?.(reason)
+    return null
+  }
   const botToken = env.TELEGRAM_BOT_TOKEN
-  if (!botToken || !initData || initData.length > 8192) return null
+  if (!botToken) return fail('bot_token_missing')
+  if (!initData) return fail('payload_missing')
+  if (initData.length > 8192) return fail('payload_too_large')
 
   const params = new URLSearchParams(initData)
   const suppliedHash = fromHex(params.get('hash') ?? '')
-  const authDate = Number(params.get('auth_date'))
+  const rawAuthDate = params.get('auth_date')
+  const authDate = Number(rawAuthDate)
   const userValue = params.get('user')
-  if (
-    !suppliedHash ||
-    !Number.isInteger(authDate) ||
-    authDate > Math.floor(Date.now() / 1000) + 60 ||
-    Math.floor(Date.now() / 1000) - authDate > 60 * 60 ||
-    !userValue
-  ) {
-    return null
-  }
+  if (!suppliedHash) return fail('hash_missing_or_invalid')
+  if (!rawAuthDate || !Number.isInteger(authDate)) return fail('auth_date_invalid')
+  const now = Math.floor(Date.now() / 1000)
+  if (authDate > now + 60) return fail('auth_date_in_future')
+  if (now - authDate > 60 * 60) return fail('auth_date_expired')
+  if (!userValue) return fail('user_missing')
 
   const dataCheckString = [...params.entries()]
     .filter(([key]) => key !== 'hash')
@@ -76,19 +95,26 @@ export async function verifyTelegramWebAppInitData(
       new Uint8Array(suppliedHash),
       new TextEncoder().encode(dataCheckString),
     )
-    if (!valid) return null
+    if (!valid) return fail('signature_invalid')
 
-    const user: unknown = JSON.parse(userValue)
-    if (!user || typeof user !== 'object' || Array.isArray(user)) return null
+    let user: unknown
+    try {
+      user = JSON.parse(userValue)
+    } catch {
+      return fail('user_json_invalid')
+    }
+    if (!user || typeof user !== 'object' || Array.isArray(user)) {
+      return fail('user_json_invalid')
+    }
     const record = user as Record<string, unknown>
     const id = String(record.id ?? '')
-    if (!/^\d{1,20}$/.test(id)) return null
+    if (!/^\d{1,20}$/.test(id)) return fail('user_id_invalid')
     return {
       id,
       firstName: typeof record.first_name === 'string' ? record.first_name : '',
       username: typeof record.username === 'string' ? record.username : '',
     }
   } catch {
-    return null
+    return fail('verification_error')
   }
 }

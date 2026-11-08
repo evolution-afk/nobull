@@ -75,8 +75,9 @@ export function VpnSubscriptions() {
     if (!initData) return
     const controller = new AbortController()
 
-    void fetch(`${MY_URL}?initData=${encodeURIComponent(initData)}`, {
+    void fetch(MY_URL, {
       cache: 'no-store',
+      headers: { 'X-Telegram-Init-Data': initData },
       signal: controller.signal,
     })
       .then(async (response) => {

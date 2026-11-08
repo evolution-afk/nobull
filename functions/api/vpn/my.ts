@@ -242,6 +242,9 @@ export async function onRequestGet({
     )
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
+    console.error(
+      'VPN subscriptions request cannot validate Telegram initData: TELEGRAM_BOT_TOKEN is not configured.',
+    )
     return jsonResponse(
       { ok: false, error: 'احراز هویت تلگرام پیکربندی نشده است.' },
       503,
@@ -250,15 +253,38 @@ export async function onRequestGet({
 
   const initData = readTelegramInitData(request)
   if (!initData) {
+    const url = new URL(request.url)
+    console.warn('VPN subscriptions request missing Telegram initData.', {
+      queryParamPresent: Boolean(url.searchParams.get('initData')?.trim()),
+      headerPresent: Boolean(
+        request.headers.get('X-Telegram-Init-Data')?.trim(),
+      ),
+      tmaAuthorizationPresent:
+        request.headers.get('Authorization')?.trim().toLowerCase().startsWith('tma ') ??
+        false,
+    })
     return jsonResponse({ ok: false, error: 'نشست تلگرام یافت نشد.' }, 401)
   }
-  const user = await verifyTelegramWebAppInitData(env, initData)
+  const initDataSource = new URL(request.url).searchParams.get('initData')?.trim()
+    ? 'query'
+    : request.headers.get('X-Telegram-Init-Data')?.trim()
+      ? 'header'
+      : 'tma_authorization'
+  console.info('VPN subscriptions Telegram initData received.', {
+    source: initDataSource,
+  })
+  const user = await verifyTelegramWebAppInitData(env, initData, (reason) => {
+    console.warn('VPN subscriptions Telegram initData validation failed.', {
+      reason,
+    })
+  })
   if (!user) {
     return jsonResponse(
       { ok: false, error: 'نشست تلگرام معتبر نیست یا منقضی شده است.' },
       401,
     )
   }
+  console.info('VPN subscriptions Telegram initData validated.')
   const telegramNumber = Number(user.id)
   if (!Number.isSafeInteger(telegramNumber) || telegramNumber <= 0) {
     return jsonResponse(
@@ -275,6 +301,10 @@ export async function onRequestGet({
         .all<SubscriptionRow>(),
       database.prepare(ACTIVE_SERVERS_QUERY).all<ServerRow>(),
     ])
+    console.info('VPN subscriptions query completed.', {
+      activeSubscriptionCount: subscriptionsResult.results.length,
+      activeServerCount: serversResult.results.length,
+    })
 
     const client =
       env.VAR_API_URL && env.VAR_API_TOKEN ? new VpnClient(env) : null
